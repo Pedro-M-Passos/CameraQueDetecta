@@ -72,7 +72,9 @@ SMILE_WIDTH_RATIO = 0.42      # largura da boca / largura do rosto
 SMILE_OPEN_RATIO = 0.06       # abertura da boca / altura do rosto
 LOOK_UP_IRIS_RATIO = 0.38     # posição vertical da íris no olho (0 = topo, 1 = base)
 HEAD_UP_NOSE_RATIO = 0.42     # posição vertical do nariz entre testa e queixo
-TIMEOUT_TOUCH_RATIO = 0.9     # distância ponta do dedo -> palma / tamanho da mão
+TIMEOUT_TOUCH_RATIO = 0.6     # distância dedos da mão vertical -> mão horizontal / tamanho da mão
+TIMEOUT_AXIS_TOLERANCE = 0.55 # quão inclinada a mão pode estar e ainda contar como vertical/horizontal
+TIMEOUT_GRACE_FRAMES = 4      # frames em que o timeout "segura" se o MediaPipe perder uma das mãos
 
 # Índices de landmarks do FaceMesh (o FaceLandmarker usa a mesma malha de 478 pontos)
 MOUTH_LEFT, MOUTH_RIGHT = 61, 291
@@ -89,7 +91,6 @@ INDEX_MCP, INDEX_PIP, INDEX_TIP = 5, 6, 8
 MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP = 9, 10, 12
 RING_MCP, RING_PIP, RING_TIP = 13, 14, 16
 PINKY_MCP, PINKY_PIP, PINKY_TIP = 17, 18, 20
-PALM_POINTS = (WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP)
 
 HAND_CONNECTIONS = [(c.start, c.end) for c in vision.HandLandmarksConnections.HAND_CONNECTIONS]
 
@@ -109,10 +110,6 @@ def _dist(a, b):
 def _hand_size(lm):
     """Tamanho de referência da mão: pulso até a base do dedo médio."""
     return _dist(lm[WRIST], lm[MIDDLE_MCP]) or 1e-6
-
-
-def _palm_center(lm):
-    return np.mean([_xy(lm[i]) for i in PALM_POINTS], axis=0)
 
 
 def finger_extended(lm, tip, pip):
@@ -186,28 +183,52 @@ def is_thumbs_up(lm):
     return thumb_up and highest
 
 
+def _hand_axis(lm):
+    """Direção normalizada do eixo pulso -> base do dedo médio."""
+    axis = _xy(lm[MIDDLE_MCP]) - _xy(lm[WRIST])
+    return axis / (np.linalg.norm(axis) or 1e-6)
+
+
 def hand_orientation(lm):
     """'vertical' se o eixo pulso->base do dedo médio for mais vertical que horizontal."""
-    dx, dy = _xy(lm[MIDDLE_MCP]) - _xy(lm[WRIST])
+    dx, dy = _hand_axis(lm)
     return "vertical" if abs(dy) > abs(dx) else "horizontal"
 
 
+def timeout_distance(hands):
+    """Quão perto as mãos estão de formar o T (menor = melhor; None se não há par válido).
+
+    Para cada par (tronco, barra): o tronco precisa estar mais em pé e a barra mais deitada,
+    com folga de TIMEOUT_AXIS_TOLERANCE. A distância é a menor entre a ponta de qualquer dedo
+    (exceto o polegar) do tronco e qualquer ponto da barra, dividida pelo tamanho médio das mãos. Comparar com
+    todos os pontos da barra (e não só o centro da palma) tolera mãos sobrepostas ou o toque
+    perto dos dedos.
+    """
+    best = None
+    for stem in hands:
+        for bar in hands:
+            if stem is bar:
+                continue
+            # o tronco aponta para cima (y cresce para baixo na imagem)
+            if -_hand_axis(stem)[1] < TIMEOUT_AXIS_TOLERANCE:
+                continue
+            # o tronco é a mão aberta/esticada, não um punho fechado
+            if not any(fingers_state(stem)[:2]):
+                continue
+            if abs(_hand_axis(bar)[0]) < TIMEOUT_AXIS_TOLERANCE:
+                continue
+            size = (_hand_size(stem) + _hand_size(bar)) / 2
+            bar_points = np.array([_xy(p) for p in bar])
+            for tip in (INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP):
+                dist = float(np.min(np.linalg.norm(bar_points - _xy(stem[tip]), axis=1))) / size
+                best = dist if best is None else min(best, dist)
+    return best
+
+
 def is_timeout(hands):
-    """Timeout (T): uma mão vertical cuja ponta do dedo toca a palma de uma mão horizontal."""
-    if len(hands) < 2:
-        return False
-    for vertical in hands:
-        for horizontal in hands:
-            if vertical is horizontal:
-                continue
-            if hand_orientation(vertical) != "vertical" or hand_orientation(horizontal) != "horizontal":
-                continue
-            palm = _palm_center(horizontal)
-            reach = _hand_size(horizontal) * TIMEOUT_TOUCH_RATIO
-            for tip in (INDEX_TIP, MIDDLE_TIP):
-                if np.linalg.norm(_xy(vertical[tip]) - palm) < reach:
-                    return True
-    return False
+    """Timeout (T): uma mão em pé com a ponta dos dedos encostando na mão deitada."""
+    dist = timeout_distance(hands) if len(hands) >= 2 else None
+    return dist is not None and dist < TIMEOUT_TOUCH_RATIO
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +255,28 @@ def classify(face_landmarks, hand_landmarks):
         if is_looking_up(face_landmarks):
             return THINKING
     return NEUTRAL
+
+
+class TimeoutGrace:
+    """Quando as mãos se sobrepõem no T, o MediaPipe às vezes perde uma delas por 1 ou 2 frames.
+
+    Se o timeout foi visto há pouco e agora só aparece uma mão (ou nenhuma), mantém o timeout
+    por até TIMEOUT_GRACE_FRAMES frames para o histórico de 7 frames não ser zerado.
+    """
+
+    def __init__(self, frames=TIMEOUT_GRACE_FRAMES):
+        self.frames = frames
+        self.remaining = 0
+
+    def apply(self, gesture, num_hands):
+        if gesture == TIMEOUT:
+            self.remaining = self.frames
+        elif self.remaining > 0 and num_hands < 2:
+            self.remaining -= 1
+            return TIMEOUT
+        else:
+            self.remaining = 0
+        return gesture
 
 
 class GestureStabilizer:
@@ -289,6 +332,18 @@ def draw_face(frame, face_landmarks):
         cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 1, WHITE, -1)
 
 
+def draw_timeout_debug(frame, hands):
+    """Mostra quantas mãos foram vistas e quão perto o T está do limiar (para ajustar o gesto)."""
+    dist = timeout_distance(hands) if len(hands) >= 2 else None
+    if len(hands) < 2:
+        text = f"Maos: {len(hands)} (timeout precisa das 2 maos visiveis)"
+    elif dist is None:
+        text = "Maos: 2 | T: uma mao em pe e outra deitada"
+    else:
+        text = f"Maos: 2 | T: distancia {dist:.2f} (precisa < {TIMEOUT_TOUCH_RATIO:.2f})"
+    cv2.putText(frame, text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, PINK, 2)
+
+
 def draw_hand(frame, hand_landmarks):
     h, w = frame.shape[:2]
     points = [(int(lm.x * w), int(lm.y * h)) for lm in hand_landmarks]
@@ -335,7 +390,8 @@ def create_hand_landmarker():
         base_options=BaseOptions(model_asset_path=model_path("hand_landmarker.task")),
         running_mode=vision.RunningMode.VIDEO,
         num_hands=2,
-        min_hand_detection_confidence=0.6,
+        min_hand_detection_confidence=0.5,
+        min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
     return vision.HandLandmarker.create_from_options(options)
@@ -368,6 +424,7 @@ def main():
     cap = open_webcam()
     memes = load_memes()
     stabilizer = GestureStabilizer()
+    timeout_grace = TimeoutGrace()
 
     start = time.monotonic()
     last_ts = -1
@@ -397,11 +454,12 @@ def main():
             for hand in hand_list:
                 draw_hand(frame, hand)
 
-            detected = classify(face, hand_list)
+            detected = timeout_grace.apply(classify(face, hand_list), len(hand_list))
             state = stabilizer.update(detected)
 
             cv2.putText(frame, f"Detectado: {detected} | Meme: {state}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2)
+            draw_timeout_debug(frame, hand_list)
             cv2.imshow(WEBCAM_WINDOW, frame)
             cv2.imshow(MEME_WINDOW, memes[state])
 
