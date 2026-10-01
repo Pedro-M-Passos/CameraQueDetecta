@@ -1,4 +1,2 @@
 opencv-python
-# 0.10.21 ainda inclui a API mp.solutions (FaceMesh/Hands); versões mais novas a removeram.
-# Requer Python 3.9 a 3.12.
-mediapipe==0.10.21
+mediapipe>=0.10.30

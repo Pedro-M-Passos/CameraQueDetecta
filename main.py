@@ -5,15 +5,22 @@ Uso:
     python main.py
 
 Pressione ESC para sair.
+
+Na primeira execução os modelos do MediaPipe (face_landmarker.task e hand_landmarker.task)
+são baixados automaticamente para a pasta models/.
 """
 
 import os
 import sys
+import time
+import urllib.request
 from collections import deque
 
 import cv2
 import mediapipe as mp
 import numpy as np
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python import vision
 
 # ---------------------------------------------------------------------------
 # Configuração
@@ -21,6 +28,14 @@ import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets", "new")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+
+MODEL_URLS = {
+    "face_landmarker.task": "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+                            "face_landmarker/float16/1/face_landmarker.task",
+    "hand_landmarker.task": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+                            "hand_landmarker/float16/1/hand_landmarker.task",
+}
 
 # Estados possíveis (gesto/expressão estabilizado) -> arquivo do meme
 SMILE = "sorriso"
@@ -57,12 +72,12 @@ LOOK_UP_IRIS_RATIO = 0.38     # posição vertical da íris no olho (0 = topo, 1
 HEAD_UP_NOSE_RATIO = 0.42     # posição vertical do nariz entre testa e queixo
 TIMEOUT_TOUCH_RATIO = 0.9     # distância ponta do dedo -> palma / tamanho da mão
 
-# Índices de landmarks do FaceMesh
+# Índices de landmarks do FaceMesh (o FaceLandmarker usa a mesma malha de 478 pontos)
 MOUTH_LEFT, MOUTH_RIGHT = 61, 291
 LIP_TOP, LIP_BOTTOM = 13, 14
 FACE_LEFT, FACE_RIGHT = 234, 454
 FOREHEAD, CHIN, NOSE_TIP = 10, 152, 1
-# (íris, pálpebra superior, pálpebra inferior) de cada olho; requer refine_landmarks=True
+# (íris, pálpebra superior, pálpebra inferior) de cada olho
 EYES = ((468, 159, 145), (473, 386, 374))
 
 # Índices de landmarks das mãos
@@ -74,9 +89,7 @@ RING_MCP, RING_PIP, RING_TIP = 13, 14, 16
 PINKY_MCP, PINKY_PIP, PINKY_TIP = 17, 18, 20
 PALM_POINTS = (WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP)
 
-mp_face_mesh = mp.solutions.face_mesh
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
+HAND_CONNECTIONS = [(c.start, c.end) for c in vision.HandLandmarksConnections.HAND_CONNECTIONS]
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +138,7 @@ def fingers_state(lm):
 
 
 # ---------------------------------------------------------------------------
-# Detecção de expressões faciais (FaceMesh)
+# Detecção de expressões faciais (FaceLandmarker / malha do FaceMesh)
 # ---------------------------------------------------------------------------
 
 def is_big_smile(face):
@@ -152,7 +165,7 @@ def is_looking_up(face):
 
 
 # ---------------------------------------------------------------------------
-# Detecção de gestos das mãos (Hands)
+# Detecção de gestos das mãos (HandLandmarker)
 # ---------------------------------------------------------------------------
 
 def is_peace_sign(lm):
@@ -270,8 +283,55 @@ def draw_face(frame, face_landmarks):
 
 
 def draw_hand(frame, hand_landmarks):
-    spec = mp_drawing.DrawingSpec(color=PINK, thickness=2, circle_radius=3)
-    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS, spec, spec)
+    h, w = frame.shape[:2]
+    points = [(int(lm.x * w), int(lm.y * h)) for lm in hand_landmarks]
+    for start, end in HAND_CONNECTIONS:
+        cv2.line(frame, points[start], points[end], PINK, 2)
+    for point in points:
+        cv2.circle(frame, point, 4, PINK, -1)
+
+
+# ---------------------------------------------------------------------------
+# Modelos do MediaPipe
+# ---------------------------------------------------------------------------
+
+def model_path(filename):
+    """Retorna o caminho do modelo, baixando-o na primeira execução."""
+    path = os.path.join(MODELS_DIR, filename)
+    if not os.path.exists(path):
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        print(f"Baixando o modelo {filename} (só na primeira execução)...")
+        try:
+            urllib.request.urlretrieve(MODEL_URLS[filename], path + ".part")
+        except OSError as exc:
+            print(f"[ERRO] Não foi possível baixar {filename}: {exc}\n"
+                  f"  Baixe manualmente de {MODEL_URLS[filename]}\n"
+                  f"  e salve em {path}", file=sys.stderr)
+            sys.exit(1)
+        os.replace(path + ".part", path)
+    return path
+
+
+def create_face_landmarker():
+    options = vision.FaceLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path("face_landmarker.task")),
+        running_mode=vision.RunningMode.VIDEO,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    return vision.FaceLandmarker.create_from_options(options)
+
+
+def create_hand_landmarker():
+    options = vision.HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path("hand_landmarker.task")),
+        running_mode=vision.RunningMode.VIDEO,
+        num_hands=2,
+        min_hand_detection_confidence=0.6,
+        min_tracking_confidence=0.5,
+    )
+    return vision.HandLandmarker.create_from_options(options)
 
 
 # ---------------------------------------------------------------------------
@@ -302,10 +362,10 @@ def main():
     memes = load_memes()
     stabilizer = GestureStabilizer()
 
-    with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
-                               min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh, \
-         mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.6,
-                        min_tracking_confidence=0.5) as hands:
+    start = time.monotonic()
+    last_ts = -1
+
+    with create_face_landmarker() as face_landmarker, create_hand_landmarker() as hand_landmarker:
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -314,20 +374,21 @@ def main():
 
             frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            face_result = face_mesh.process(rgb)
-            hand_result = hands.process(rgb)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            # O modo VIDEO exige timestamps estritamente crescentes.
+            timestamp_ms = max(int((time.monotonic() - start) * 1000), last_ts + 1)
+            last_ts = timestamp_ms
+            face_result = face_landmarker.detect_for_video(mp_image, timestamp_ms)
+            hand_result = hand_landmarker.detect_for_video(mp_image, timestamp_ms)
 
             face = None
-            if face_result.multi_face_landmarks:
-                face_lms = face_result.multi_face_landmarks[0]
-                face = face_lms.landmark
+            if face_result.face_landmarks:
+                face = face_result.face_landmarks[0]
                 draw_face(frame, face)
 
-            hand_list = []
-            for hand_lms in hand_result.multi_hand_landmarks or []:
-                hand_list.append(hand_lms.landmark)
-                draw_hand(frame, hand_lms)
+            hand_list = hand_result.hand_landmarks or []
+            for hand in hand_list:
+                draw_hand(frame, hand)
 
             detected = classify(face, hand_list)
             state = stabilizer.update(detected)
