@@ -1,0 +1,348 @@
+"""MemeCV: detecta expressões faciais e gestos das mãos pela webcam e mostra o meme correspondente.
+
+Uso:
+    pip install -r requirements.txt
+    python main.py
+
+Pressione ESC para sair.
+"""
+
+import os
+import sys
+from collections import deque
+
+import cv2
+import mediapipe as mp
+import numpy as np
+
+# ---------------------------------------------------------------------------
+# Configuração
+# ---------------------------------------------------------------------------
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets", "new")
+
+# Estados possíveis (gesto/expressão estabilizado) -> arquivo do meme
+SMILE = "sorriso"
+PEACE = "paz"
+THINKING = "pensando"
+THUMBS_UP = "joinha"
+TIMEOUT = "timeout"
+NEUTRAL = "neutro"
+
+MEME_FILES = {
+    SMILE: "109fb257daabe2f3db63bd7bc1944934.jpg",
+    PEACE: "109fb257daabe2f3db63bd7bc1944934.jpg",
+    THINKING: "maxresdefault.jpg",
+    NEUTRAL: "maxresdefault.jpg",
+    THUMBS_UP: "7dc6efb0fe7548ae00dd6143e739f630.jpg",
+    TIMEOUT: "bc3d38ffc8a2e9a574bb54d3bffa5445.jpg",
+}
+
+HISTORY_SIZE = 7          # frames consecutivos necessários para trocar o meme
+ESC_KEY = 27
+MEME_WINDOW_HEIGHT = 480
+
+WEBCAM_WINDOW = "MemeCV - Webcam"
+MEME_WINDOW = "MemeCV - Meme"
+
+# Cores em BGR
+WHITE = (255, 255, 255)
+PINK = (180, 105, 255)
+
+# Limiares das detecções (ajuste se necessário para sua câmera/iluminação)
+SMILE_WIDTH_RATIO = 0.42      # largura da boca / largura do rosto
+SMILE_OPEN_RATIO = 0.06       # abertura da boca / altura do rosto
+LOOK_UP_IRIS_RATIO = 0.38     # posição vertical da íris no olho (0 = topo, 1 = base)
+HEAD_UP_NOSE_RATIO = 0.42     # posição vertical do nariz entre testa e queixo
+TIMEOUT_TOUCH_RATIO = 0.9     # distância ponta do dedo -> palma / tamanho da mão
+
+# Índices de landmarks do FaceMesh
+MOUTH_LEFT, MOUTH_RIGHT = 61, 291
+LIP_TOP, LIP_BOTTOM = 13, 14
+FACE_LEFT, FACE_RIGHT = 234, 454
+FOREHEAD, CHIN, NOSE_TIP = 10, 152, 1
+# (íris, pálpebra superior, pálpebra inferior) de cada olho; requer refine_landmarks=True
+EYES = ((468, 159, 145), (473, 386, 374))
+
+# Índices de landmarks das mãos
+WRIST = 0
+THUMB_MCP, THUMB_IP, THUMB_TIP = 2, 3, 4
+INDEX_MCP, INDEX_PIP, INDEX_TIP = 5, 6, 8
+MIDDLE_MCP, MIDDLE_PIP, MIDDLE_TIP = 9, 10, 12
+RING_MCP, RING_PIP, RING_TIP = 13, 14, 16
+PINKY_MCP, PINKY_PIP, PINKY_TIP = 17, 18, 20
+PALM_POINTS = (WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP)
+
+mp_face_mesh = mp.solutions.face_mesh
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+
+
+# ---------------------------------------------------------------------------
+# Utilitários geométricos
+# ---------------------------------------------------------------------------
+
+def _xy(landmark):
+    return np.array([landmark.x, landmark.y])
+
+
+def _dist(a, b):
+    return float(np.linalg.norm(_xy(a) - _xy(b)))
+
+
+def _hand_size(lm):
+    """Tamanho de referência da mão: pulso até a base do dedo médio."""
+    return _dist(lm[WRIST], lm[MIDDLE_MCP]) or 1e-6
+
+
+def _palm_center(lm):
+    return np.mean([_xy(lm[i]) for i in PALM_POINTS], axis=0)
+
+
+def finger_extended(lm, tip, pip):
+    """Um dedo está esticado quando a ponta fica mais longe do pulso do que a articulação PIP.
+
+    Usar distâncias (em vez de comparar só o eixo y) funciona com a mão em qualquer orientação.
+    """
+    return _dist(lm[tip], lm[WRIST]) > _dist(lm[pip], lm[WRIST]) * 1.1
+
+
+def thumb_extended(lm):
+    """Polegar esticado: ponta longe da base do indicador e alinhado com a articulação IP."""
+    return (_dist(lm[THUMB_TIP], lm[INDEX_MCP]) > _hand_size(lm) * 0.6
+            and _dist(lm[THUMB_TIP], lm[WRIST]) > _dist(lm[THUMB_IP], lm[WRIST]))
+
+
+def fingers_state(lm):
+    """Retorna (indicador, médio, anelar, mindinho) como booleanos de 'esticado'."""
+    return (
+        finger_extended(lm, INDEX_TIP, INDEX_PIP),
+        finger_extended(lm, MIDDLE_TIP, MIDDLE_PIP),
+        finger_extended(lm, RING_TIP, RING_PIP),
+        finger_extended(lm, PINKY_TIP, PINKY_PIP),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Detecção de expressões faciais (FaceMesh)
+# ---------------------------------------------------------------------------
+
+def is_big_smile(face):
+    """Sorriso grande: boca larga em relação ao rosto e bem aberta."""
+    face_width = _dist(face[FACE_LEFT], face[FACE_RIGHT]) or 1e-6
+    face_height = _dist(face[FOREHEAD], face[CHIN]) or 1e-6
+    mouth_width = _dist(face[MOUTH_LEFT], face[MOUTH_RIGHT]) / face_width
+    mouth_open = _dist(face[LIP_TOP], face[LIP_BOTTOM]) / face_height
+    return mouth_width > SMILE_WIDTH_RATIO and mouth_open > SMILE_OPEN_RATIO
+
+
+def is_looking_up(face):
+    """Olhar para cima / pose de pensamento: íris no alto dos olhos ou cabeça inclinada para trás."""
+    iris_ratios = []
+    for iris, top, bottom in EYES:
+        eye_height = face[bottom].y - face[top].y
+        if eye_height > 1e-6:
+            iris_ratios.append((face[iris].y - face[top].y) / eye_height)
+    eyes_up = bool(iris_ratios) and float(np.mean(iris_ratios)) < LOOK_UP_IRIS_RATIO
+
+    face_height = face[CHIN].y - face[FOREHEAD].y
+    head_up = face_height > 1e-6 and (face[NOSE_TIP].y - face[FOREHEAD].y) / face_height < HEAD_UP_NOSE_RATIO
+    return eyes_up or head_up
+
+
+# ---------------------------------------------------------------------------
+# Detecção de gestos das mãos (Hands)
+# ---------------------------------------------------------------------------
+
+def is_peace_sign(lm):
+    """Sinal de paz: indicador e médio levantados, anelar e mindinho abaixados."""
+    index, middle, ring, pinky = fingers_state(lm)
+    return index and middle and not ring and not pinky
+
+
+def is_thumbs_up(lm):
+    """Joinha: só o polegar levantado (apontando para cima), demais dedos dobrados."""
+    if any(fingers_state(lm)) or not thumb_extended(lm):
+        return False
+    # O polegar precisa apontar para cima e ser o ponto mais alto da mão (y cresce para baixo).
+    thumb_up = lm[THUMB_TIP].y < lm[THUMB_MCP].y - _hand_size(lm) * 0.3
+    highest = all(lm[THUMB_TIP].y <= lm[i].y for i in range(21) if i != THUMB_TIP)
+    return thumb_up and highest
+
+
+def hand_orientation(lm):
+    """'vertical' se o eixo pulso->base do dedo médio for mais vertical que horizontal."""
+    dx, dy = _xy(lm[MIDDLE_MCP]) - _xy(lm[WRIST])
+    return "vertical" if abs(dy) > abs(dx) else "horizontal"
+
+
+def is_timeout(hands):
+    """Timeout (T): uma mão vertical cuja ponta do dedo toca a palma de uma mão horizontal."""
+    if len(hands) < 2:
+        return False
+    for vertical in hands:
+        for horizontal in hands:
+            if vertical is horizontal:
+                continue
+            if hand_orientation(vertical) != "vertical" or hand_orientation(horizontal) != "horizontal":
+                continue
+            palm = _palm_center(horizontal)
+            reach = _hand_size(horizontal) * TIMEOUT_TOUCH_RATIO
+            for tip in (INDEX_TIP, MIDDLE_TIP):
+                if np.linalg.norm(_xy(vertical[tip]) - palm) < reach:
+                    return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Classificação e estabilização
+# ---------------------------------------------------------------------------
+
+def classify(face_landmarks, hand_landmarks):
+    """Escolhe o estado do frame atual. Gestos das mãos têm prioridade sobre o rosto.
+
+    face_landmarks: lista de landmarks de um rosto (ou None)
+    hand_landmarks: lista com a lista de landmarks de cada mão detectada
+    """
+    if is_timeout(hand_landmarks):
+        return TIMEOUT
+    for hand in hand_landmarks:
+        if is_thumbs_up(hand):
+            return THUMBS_UP
+    for hand in hand_landmarks:
+        if is_peace_sign(hand):
+            return PEACE
+    if face_landmarks is not None:
+        if is_big_smile(face_landmarks):
+            return SMILE
+        if is_looking_up(face_landmarks):
+            return THINKING
+    return NEUTRAL
+
+
+class GestureStabilizer:
+    """Só troca o estado quando o mesmo gesto aparece em HISTORY_SIZE frames consecutivos."""
+
+    def __init__(self, size=HISTORY_SIZE, initial=NEUTRAL):
+        self.history = deque(maxlen=size)
+        self.current = initial
+
+    def update(self, gesture):
+        self.history.append(gesture)
+        if len(self.history) == self.history.maxlen and len(set(self.history)) == 1:
+            self.current = gesture
+        return self.current
+
+
+# ---------------------------------------------------------------------------
+# Imagens e desenho
+# ---------------------------------------------------------------------------
+
+def _placeholder(filename):
+    img = np.zeros((MEME_WINDOW_HEIGHT, 640, 3), dtype=np.uint8)
+    cv2.putText(img, "Imagem nao encontrada:", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.8, WHITE, 2)
+    cv2.putText(img, f"assets/new/{filename}", (20, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1)
+    return img
+
+
+def load_memes():
+    """Carrega cada imagem uma vez; se faltar, usa um aviso no lugar."""
+    cache, memes = {}, {}
+    for state, filename in MEME_FILES.items():
+        if filename not in cache:
+            img = cv2.imread(os.path.join(ASSETS_DIR, filename))
+            if img is None:
+                print(f"[aviso] Meme não encontrado: {os.path.join(ASSETS_DIR, filename)}")
+                img = _placeholder(filename)
+            else:
+                scale = MEME_WINDOW_HEIGHT / img.shape[0]
+                img = cv2.resize(img, (int(img.shape[1] * scale), MEME_WINDOW_HEIGHT))
+            cache[filename] = img
+        memes[state] = cache[filename]
+    return memes
+
+
+def draw_face(frame, face_landmarks):
+    h, w = frame.shape[:2]
+    for lm in face_landmarks:
+        cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 1, WHITE, -1)
+
+
+def draw_hand(frame, hand_landmarks):
+    spec = mp_drawing.DrawingSpec(color=PINK, thickness=2, circle_radius=3)
+    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS, spec, spec)
+
+
+# ---------------------------------------------------------------------------
+# Programa principal
+# ---------------------------------------------------------------------------
+
+def open_webcam(index=0):
+    cap = cv2.VideoCapture(index)
+    if not cap.isOpened() or not cap.read()[0]:
+        cap.release()
+        print(
+            "\n[ERRO] Não foi possível abrir a webcam.\n"
+            "  - Se você está usando o WSL2, a webcam não fica disponível dentro do Linux.\n"
+            "    Execute o programa pelo terminal do Windows (PowerShell ou Prompt de Comando):\n"
+            "        pip install -r requirements.txt\n"
+            "        python main.py\n"
+            "  - Verifique também se a câmera está conectada e não está em uso por outro programa\n"
+            "    (Teams, Zoom, navegador...) e se o Windows permite o acesso à câmera em\n"
+            "    Configurações > Privacidade e segurança > Câmera.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return cap
+
+
+def main():
+    cap = open_webcam()
+    memes = load_memes()
+    stabilizer = GestureStabilizer()
+
+    with mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
+                               min_detection_confidence=0.5, min_tracking_confidence=0.5) as face_mesh, \
+         mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.6,
+                        min_tracking_confidence=0.5) as hands:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                print("[ERRO] A webcam parou de enviar imagens.", file=sys.stderr)
+                break
+
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb.flags.writeable = False
+            face_result = face_mesh.process(rgb)
+            hand_result = hands.process(rgb)
+
+            face = None
+            if face_result.multi_face_landmarks:
+                face_lms = face_result.multi_face_landmarks[0]
+                face = face_lms.landmark
+                draw_face(frame, face)
+
+            hand_list = []
+            for hand_lms in hand_result.multi_hand_landmarks or []:
+                hand_list.append(hand_lms.landmark)
+                draw_hand(frame, hand_lms)
+
+            detected = classify(face, hand_list)
+            state = stabilizer.update(detected)
+
+            cv2.putText(frame, f"Detectado: {detected} | Meme: {state}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2)
+            cv2.imshow(WEBCAM_WINDOW, frame)
+            cv2.imshow(MEME_WINDOW, memes[state])
+
+            if cv2.waitKey(1) & 0xFF == ESC_KEY:
+                break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
