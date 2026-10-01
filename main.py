@@ -45,14 +45,16 @@ THUMBS_UP = "joinha"
 TIMEOUT = "timeout"
 NEUTRAL = "neutro"
 
+# Nome do arquivo sem extensão; aceita .jpg, .jpeg, .png ou .webp
 MEME_FILES = {
-    SMILE: "109fb257daabe2f3db63bd7bc1944934.jpg",
-    PEACE: "109fb257daabe2f3db63bd7bc1944934.jpg",
-    THINKING: "maxresdefault.jpg",
-    NEUTRAL: "maxresdefault.jpg",
-    THUMBS_UP: "7dc6efb0fe7548ae00dd6143e739f630.jpg",
-    TIMEOUT: "bc3d38ffc8a2e9a574bb54d3bffa5445.jpg",
+    SMILE: "sorriso",
+    PEACE: "sorriso",
+    THINKING: "pensando",
+    NEUTRAL: "pensando",
+    THUMBS_UP: "joinha",
+    TIMEOUT: "timeout",
 }
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 
 HISTORY_SIZE = 7          # frames consecutivos necessários para trocar o meme
 ESC_KEY = 27
@@ -255,7 +257,7 @@ class GestureStabilizer:
 def _placeholder(filename):
     img = np.zeros((MEME_WINDOW_HEIGHT, 640, 3), dtype=np.uint8)
     cv2.putText(img, "Imagem nao encontrada:", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.8, WHITE, 2)
-    cv2.putText(img, f"assets/new/{filename}", (20, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1)
+    cv2.putText(img, f"assets/new/{filename}.jpg", (20, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1)
     return img
 
 
@@ -264,9 +266,14 @@ def load_memes():
     cache, memes = {}, {}
     for state, filename in MEME_FILES.items():
         if filename not in cache:
-            img = cv2.imread(os.path.join(ASSETS_DIR, filename))
+            img = None
+            for ext in IMAGE_EXTENSIONS:
+                path = os.path.join(ASSETS_DIR, filename + ext)
+                if os.path.exists(path):
+                    img = cv2.imread(path)
+                    break
             if img is None:
-                print(f"[aviso] Meme não encontrado: {os.path.join(ASSETS_DIR, filename)}")
+                print(f"[aviso] Meme não encontrado: {os.path.join(ASSETS_DIR, filename)}.jpg")
                 img = _placeholder(filename)
             else:
                 scale = MEME_WINDOW_HEIGHT / img.shape[0]
