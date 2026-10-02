@@ -21,7 +21,7 @@ Variáveis de ambiente (opcionais; a escolha salva pelo visor vale quando elas n
     WOLF_VOICE=0            começa com a voz desligada
     WOLF_VOICE_NAME         parte do nome da voz (ex.: "Daniel")
     WOLF_VOICE_SPEED        velocidade da fala (1.0 = normal, 1.2 = 20% mais rápida)
-    WOLF_VOICE_FX           efeito: robo, leve ou nenhum
+    WOLF_VOICE_FX           efeito: blade_wolf (padrão), robo, leve ou nenhum
 """
 
 import atexit
@@ -44,14 +44,23 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wolf_
 DEFAULT_SPEED = 1.1
 
 # Efeitos (ajuste a gosto). pitch < 1 deixa a voz mais grave, sem mudar a velocidade.
+# Chaves opcionais: chorus_ms/chorus_depth_ms/chorus_hz/chorus_mix (voz "dobrada", sintética)
+# e reverb_mix/reverb_ms (reverberação metálica curta, como dentro de um chassi).
 EFFECTS = {
+    # Inspirado no estilo do Blade Wolf: voz masculina grave, calma e medida, com uma camada
+    # sintética sutil. Fica melhor com uma voz masculina de base (ex.: Daniel ou David).
+    "blade_wolf": {"pitch": 0.8, "ring_hz": 70, "ring_mix": 0.12, "echo_ms": 0, "echo_gain": 0,
+                   "band": (90, 6500), "bits": 0,
+                   "chorus_ms": 9, "chorus_depth_ms": 2.5, "chorus_hz": 0.35, "chorus_mix": 0.35,
+                   "reverb_mix": 0.22, "reverb_ms": 140},
     "robo": {"pitch": 0.85, "ring_hz": 55, "ring_mix": 0.3, "echo_ms": 14, "echo_gain": 0.3,
              "band": (250, 3800), "bits": 10},
     "leve": {"pitch": 0.93, "ring_hz": 40, "ring_mix": 0.1, "echo_ms": 10, "echo_gain": 0.18,
              "band": (150, 5000), "bits": 0},
     "nenhum": None,
 }
-EFFECT_ORDER = ["robo", "leve", "nenhum"]
+EFFECT_ORDER = ["blade_wolf", "robo", "leve", "nenhum"]
+DEFAULT_EFFECT = "blade_wolf"
 VOLUME = 0.9
 
 # ---------------------------------------------------------------------------
@@ -265,7 +274,22 @@ def pitch_shift(audio, rate, factor):
     return shifted[:len(audio)]
 
 
-def apply_effect(audio, rate, name="robo"):
+def metallic_reverb(audio, rate, length_ms):
+    """Convolução com reflexões em intervalos curtos e primos (soa como metal oco)."""
+    size = int(rate * length_ms / 1000)
+    ir = np.zeros(size, dtype=np.float32)
+    for spacing_ms in (3.1, 4.7, 7.3, 11.3):
+        step = max(1, int(rate * spacing_ms / 1000))
+        taps = np.arange(step, size, step)
+        ir[taps] += np.exp(-taps / (size / 4)) * 0.5
+    total = len(audio) + size
+    nfft = 1 << (total - 1).bit_length()
+    wet = np.fft.irfft(np.fft.rfft(audio, nfft) * np.fft.rfft(ir, nfft), nfft)[:len(audio)]
+    peak = float(np.max(np.abs(wet))) or 1.0
+    return wet / peak * float(np.max(np.abs(audio)))
+
+
+def apply_effect(audio, rate, name=DEFAULT_EFFECT):
     """Aplica o efeito escolhido e devolve o áudio novo (mesma duração)."""
     fx = EFFECTS.get(name)
     if audio.size == 0:
@@ -281,6 +305,14 @@ def apply_effect(audio, rate, name="robo"):
             echo = np.zeros_like(audio)
             echo[delay:] = audio[:-delay] * fx["echo_gain"]
             audio = audio + echo
+        # Chorus: soma uma cópia com atraso que oscila devagar (voz "dobrada", sintética).
+        if fx.get("chorus_mix"):
+            n = np.arange(len(audio))
+            delay = (fx["chorus_ms"] + fx["chorus_depth_ms"] * np.sin(2 * np.pi * fx["chorus_hz"] * n / rate)) * rate / 1000
+            audio = audio + np.interp(n - delay, n, audio, left=0) * fx["chorus_mix"]
+        # Reverberação metálica: reflexões curtas e regulares que somem rápido.
+        if fx.get("reverb_mix"):
+            audio = audio + metallic_reverb(audio, rate, fx["reverb_ms"]) * fx["reverb_mix"]
         # Filtro de rádio: atenua graves e agudos extremos.
         spectrum = np.fft.rfft(audio)
         freqs = np.fft.rfftfreq(len(audio), 1 / rate)
@@ -334,9 +366,9 @@ def current_settings():
     """(nome da voz, efeito, velocidade): variáveis de ambiente > escolha salva > padrão."""
     saved = load_settings()
     name = os.environ.get("WOLF_VOICE_NAME") or saved.get("voz")
-    effect = os.environ.get("WOLF_VOICE_FX") or saved.get("efeito") or "robo"
+    effect = os.environ.get("WOLF_VOICE_FX") or saved.get("efeito") or DEFAULT_EFFECT
     if effect not in EFFECTS:
-        effect = "robo"
+        effect = DEFAULT_EFFECT
     try:
         speed = float(os.environ.get("WOLF_VOICE_SPEED") or saved.get("velocidade") or DEFAULT_SPEED)
     except ValueError:

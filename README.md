@@ -96,9 +96,15 @@ no Windows ele usa as vozes do próprio sistema.
 |-------|------|
 | `M` | liga/desliga a voz |
 | `N` | troca para a próxima voz instalada (ela fala o próprio nome) |
-| `F` | troca o efeito: `robo` → `leve` → `nenhum` |
+| `F` | troca o efeito: `blade_wolf` → `robo` → `leve` → `nenhum` |
 
 A voz e o efeito escolhidos ficam salvos em `.wolf_voz.json`.
+
+O efeito `blade_wolf` (padrão) é inspirado no estilo do personagem: grave, calmo e com uma
+camada sintética sutil (chorus e reverberação metálica). Ele soa melhor com uma voz masculina
+de base, como Microsoft Daniel (português) ou David (inglês), e com
+`$env:WOLF_VOICE_SPEED = "1.0"` para uma fala mais pausada. Os parâmetros ficam no topo de
+`voice.py`.
 
 Para ver e ouvir as vozes instaladas pelo terminal:
 
