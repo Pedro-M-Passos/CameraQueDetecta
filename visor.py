@@ -13,8 +13,13 @@ Opções:
     --image FOTO          usa uma foto no lugar da webcam
     --snapshot SAIDA.png  com --image: desenha o HUD, salva a imagem e sai (sem janela)
     --width PIXELS        largura da janela do visor (padrão 1280)
+    --detect-width PIXELS largura da imagem usada pelos detectores (padrão 480; menor = mais FPS)
+    --object-every N      detector de objetos a cada N quadros (padrão 3; maior = mais FPS)
+    --cam-width/--cam-height  resolução pedida à webcam (padrão 640x480)
+    --no-objects, --no-lens   começa com objetos ou efeito da lente desligados
 
 Teclas: T ou ENTER fala com o Wolf, V manda a imagem atual para ele analisar,
+1/2/3 ligam e desligam rosto, mãos e objetos, L liga e desliga o efeito da lente,
 H mostra a ajuda, ESC sai. Também dá para digitar para o Wolf no próprio terminal.
 
 Reaproveita do MemeCV (main.py) os modelos de rosto e mãos e a classificação de gestos.
@@ -39,6 +44,8 @@ OBJECT_MODEL = "efficientdet_lite0.tflite"
 OBJECT_SCORE_THRESHOLD = 0.45
 OBJECT_MAX_RESULTS = 5
 SCAN_IMAGE_WIDTH = 1024   # largura máxima da imagem enviada ao Wolf
+DETECT_WIDTH = 480        # os detectores rodam numa cópia pequena do quadro (bem mais rápido)
+OBJECT_EVERY = 3          # o detector de objetos roda 1 vez a cada N quadros analisados
 SNAPSHOT_FRAMES = 12      # quadros processados antes de salvar no modo --snapshot
 
 ENTER_KEYS = (10, 13)
@@ -54,6 +61,7 @@ GESTURE_LABELS = {
     memecv.TIMEOUT: "timeout",
 }
 HANDEDNESS = {"Left": "MAO ESQ", "Right": "MAO DIR"}
+DETECTOR_KEYS = {"1": "face", "2": "hands", "3": "objects"}
 # Nomes em português para as classes mais comuns do detector (as outras ficam em inglês)
 OBJECT_NAMES = {
     "person": "PESSOA", "cell phone": "CELULAR", "cup": "COPO", "bottle": "GARRAFA",
@@ -87,16 +95,24 @@ def landmarks_box(landmarks, w, h, pad=0.08):
 
 
 class Sensors:
-    """Roda rosto, mãos e objetos em cada quadro e monta a lista de alvos do HUD."""
+    """Roda rosto, mãos e objetos e monta a lista de alvos do HUD.
 
-    def __init__(self):
+    Cada detector pode ser ligado/desligado (teclas 1, 2 e 3). O de objetos é o mais pesado,
+    então roda só a cada object_every quadros e repete o último resultado nos intervalos.
+    """
+
+    def __init__(self, object_every=OBJECT_EVERY):
         self.face = memecv.create_face_landmarker()
         self.hands = memecv.create_hand_landmarker()
         self.objects = create_object_detector()
+        self.enabled = {"face": True, "hands": True, "objects": True}
+        self.object_every = max(1, object_every)
         self.stabilizer = memecv.GestureStabilizer()
         self.timeout_grace = memecv.TimeoutGrace()
         self.start = time.monotonic()
         self.last_ts = -1
+        self.count = 0
+        self.last_objects = []
 
     def close(self):
         self.face.close()
@@ -111,43 +127,145 @@ class Sensors:
         # O modo VIDEO exige timestamps estritamente crescentes.
         ts = max(int((time.monotonic() - self.start) * 1000), self.last_ts + 1)
         self.last_ts = ts
-
-        face_result = self.face.detect_for_video(image, ts)
-        hand_result = self.hands.detect_for_video(image, ts)
-        object_result = self.objects.detect_for_video(image, ts)
+        self.count += 1
 
         targets = []
-        face = face_result.face_landmarks[0] if face_result.face_landmarks else None
+        face = None
+        if self.enabled["face"]:
+            face_result = self.face.detect_for_video(image, ts)
+            face = face_result.face_landmarks[0] if face_result.face_landmarks else None
         if face is not None:
             targets.append({"kind": "FACE", "box": landmarks_box(face, 1, 1),
                             "label": "BIO-SINAL", "sub": "ROSTO HUMANO"})
 
-        hand_list = hand_result.hand_landmarks or []
-        for i, hand in enumerate(hand_list):
-            side = "MAO"
-            if hand_result.handedness and i < len(hand_result.handedness):
-                side = HANDEDNESS.get(hand_result.handedness[i][0].category_name, "MAO")
-            targets.append({"kind": "HAND", "box": landmarks_box(hand, 1, 1),
-                            "label": side, "sub": "RASTREANDO"})
+        hand_list = []
+        if self.enabled["hands"]:
+            hand_result = self.hands.detect_for_video(image, ts)
+            hand_list = hand_result.hand_landmarks or []
+            for i, hand in enumerate(hand_list):
+                side = "MAO"
+                if hand_result.handedness and i < len(hand_result.handedness):
+                    side = HANDEDNESS.get(hand_result.handedness[i][0].category_name, "MAO")
+                targets.append({"kind": "HAND", "box": landmarks_box(hand, 1, 1),
+                                "label": side, "sub": "RASTREANDO"})
 
-        objects = []
-        for det in object_result.detections:
-            cat = det.categories[0]
-            name = cat.category_name or "objeto"
-            name = OBJECT_NAMES.get(name, name.upper())
-            b = det.bounding_box
-            objects.append((name, cat.score))
-            targets.append({"kind": "OBJ",
-                            "box": (b.origin_x / w, b.origin_y / h,
-                                    (b.origin_x + b.width) / w, (b.origin_y + b.height) / h),
-                            "label": name, "sub": f"CONFIANCA {cat.score * 100:.0f}%"})
+        if not self.enabled["objects"]:
+            self.last_objects = []
+        elif self.count % self.object_every == 1 or self.object_every == 1:
+            self.last_objects = []
+            for det in self.objects.detect_for_video(image, ts).detections:
+                cat = det.categories[0]
+                name = cat.category_name or "objeto"
+                b = det.bounding_box
+                self.last_objects.append({
+                    "kind": "OBJ", "label": OBJECT_NAMES.get(name, name.upper()), "score": cat.score,
+                    "box": (b.origin_x / w, b.origin_y / h,
+                            (b.origin_x + b.width) / w, (b.origin_y + b.height) / h),
+                    "sub": f"CONFIANCA {cat.score * 100:.0f}%"})
+        targets += self.last_objects
 
         detected = self.timeout_grace.apply(memecv.classify(face, hand_list), len(hand_list))
         gesture = GESTURE_LABELS.get(self.stabilizer.update(detected))
 
         readings = {"face": face is not None, "hands": len(hand_list),
-                    "objects": objects, "gesture": gesture}
+                    "objects": [(o["label"], o["score"]) for o in self.last_objects],
+                    "gesture": gesture}
         return targets, hand_list, readings
+
+
+EMPTY_READINGS = {"face": False, "hands": 0, "objects": [], "gesture": None}
+
+
+class DetectionWorker:
+    """Roda os detectores numa thread própria, sempre no quadro mais recente.
+
+    Assim a janela continua fluida mesmo quando a detecção é mais lenta que a câmera:
+    o vídeo é desenhado em todo quadro e as miras usam o último resultado pronto.
+    """
+
+    def __init__(self, sensors):
+        self.sensors = sensors
+        self.result = ([], [], EMPTY_READINGS)
+        self.rate = 0.0
+        self._frame = None
+        self._lock = threading.Lock()
+        self._new = threading.Event()
+        self._stop = False
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def submit(self, frame):
+        with self._lock:
+            self._frame = frame
+        self._new.set()
+
+    def latest(self):
+        with self._lock:
+            return self.result
+
+    def stop(self):
+        self._stop = True
+        self._new.set()
+        self._thread.join(timeout=2)
+
+    def _loop(self):
+        last = time.monotonic()
+        while not self._stop:
+            self._new.wait()
+            self._new.clear()
+            with self._lock:
+                frame, self._frame = self._frame, None
+            if frame is None or self._stop:
+                continue
+            result = self.sensors.detect(frame)
+            now = time.monotonic()
+            self.rate = 0.9 * self.rate + 0.1 * (1.0 / max(now - last, 1e-6))
+            last = now
+            with self._lock:
+                self.result = result
+
+
+class CameraStream:
+    """Lê a webcam numa thread própria; read() devolve na hora o quadro mais novo."""
+
+    def __init__(self, index, width, height):
+        self.cap = memecv.open_webcam(index)
+        if width and height:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        ok, self._frame = self.cap.read()
+        self.ok = ok
+        self._seq = 0
+        self._lock = threading.Lock()
+        self._new = threading.Condition(self._lock)
+        self._stop = False
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop:
+            ok, frame = self.cap.read()
+            with self._lock:
+                self.ok = ok
+                if ok:
+                    self._frame = frame
+                    self._seq += 1
+                self._new.notify_all()
+            if not ok:
+                break
+
+    def read(self, last_seq=-1, timeout=0.05):
+        """Retorna (ok, quadro, número do quadro), esperando um pouco por um quadro mais novo
+        que last_seq para não redesenhar a mesma imagem à toa."""
+        with self._new:
+            self._new.wait_for(lambda: self._seq != last_seq or not self.ok, timeout)
+            return self.ok, self._frame, self._seq
+
+    def release(self):
+        self._stop = True
+        self._thread.join(timeout=2)
+        self.cap.release()
 
 
 def sensors_summary(readings):
@@ -172,9 +290,9 @@ def draw_hand_skeleton(img, hand):
         cv2.circle(img, p, 2, hud.WHITE, -1, cv2.LINE_AA)
 
 
-def render(frame, targets, hand_list, readings, wolf_state, info, show_help, t):
+def render(frame, targets, hand_list, readings, wolf_state, info, show_help, t, lens=True):
     """Monta a imagem final do visor no tamanho da janela."""
-    view = hud.apply_lens(frame)
+    view = hud.apply_lens(frame) if lens else frame.copy()
     h, w = view.shape[:2]
 
     for hand in hand_list:
@@ -232,11 +350,39 @@ def start_terminal_input(lines):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Protótipo do visor com o Wolf")
-    parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--image")
-    parser.add_argument("--snapshot")
-    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--camera", type=int, default=0, help="índice da webcam")
+    parser.add_argument("--image", help="usa uma foto no lugar da webcam")
+    parser.add_argument("--snapshot", help="com --image: salva o HUD neste arquivo e sai")
+    parser.add_argument("--width", type=int, default=1280, help="largura da janela do visor")
+    parser.add_argument("--cam-width", type=int, default=640, help="resolução pedida à webcam")
+    parser.add_argument("--cam-height", type=int, default=480)
+    parser.add_argument("--detect-width", type=int, default=DETECT_WIDTH,
+                        help="largura da imagem usada pelos detectores (menor = mais rápido)")
+    parser.add_argument("--object-every", type=int, default=OBJECT_EVERY,
+                        help="roda o detector de objetos a cada N quadros (maior = mais rápido)")
+    parser.add_argument("--no-objects", action="store_true", help="começa com objetos desligados")
+    parser.add_argument("--no-lens", action="store_true", help="começa sem o efeito da lente")
     return parser.parse_args()
+
+
+def run_snapshot(args, still, wolf):
+    """Modo de teste sem câmera: detecta na foto, desenha o HUD e salva."""
+    sensors = Sensors(args.object_every)
+    sensors.enabled["objects"] = not args.no_objects
+    frame = resize_to_width(still, args.width)
+    small = resize_to_width(frame, args.detect_width)
+    try:
+        for _ in range(SNAPSHOT_FRAMES):
+            targets, hand_list, readings = sensors.detect(small)
+    finally:
+        sensors.close()
+    info = {"fps": 0.0, "det_rate": 0.0, "uptime": "00:00", "hint": "H: ajuda",
+            "sensors": sensors.enabled}
+    wolf_state = dict(wolf.snapshot(), typing=False, input="")
+    view = render(frame, targets, hand_list, readings, wolf_state, info, False, time.monotonic(),
+                  lens=not args.no_lens)
+    cv2.imwrite(args.snapshot, view)
+    print(f"HUD salvo em {args.snapshot} | sensores: {sensors_summary(readings)}")
 
 
 def main():
@@ -246,58 +392,59 @@ def main():
         still = cv2.imread(args.image)
         if still is None:
             sys.exit(f"[ERRO] Não foi possível abrir a imagem {args.image}")
-        cap = None
-    else:
-        cap = memecv.open_webcam(args.camera)
 
     wolf = Wolf()
     wolf.greet()
-    terminal_lines = queue.Queue()
-    if not args.snapshot:
-        start_terminal_input(terminal_lines)
-        print("Visor ativo. T/ENTER fala com o Wolf, V analisa a cena, H ajuda, ESC sai.")
+    if args.snapshot and still is not None:
+        run_snapshot(args, still, wolf)
+        return
 
-    sensors = Sensors()
-    typing, typed, show_help = False, "", False
+    camera = None if still is not None else CameraStream(args.camera, args.cam_width, args.cam_height)
+    terminal_lines = queue.Queue()
+    start_terminal_input(terminal_lines)
+    print("Visor ativo. T/ENTER fala com o Wolf, V analisa a cena, 1/2/3/L ajustam o FPS, "
+          "H ajuda, ESC sai.")
+
+    sensors = Sensors(args.object_every)
+    sensors.enabled["objects"] = not args.no_objects
+    worker = DetectionWorker(sensors)
+    typing, typed, show_help, lens = False, "", False, not args.no_lens
     started = last = time.monotonic()
     fps = 0.0
-    frame_count = 0
+    last_seq = -1
 
     try:
         while True:
-            if cap is not None:
-                ok, frame = cap.read()
+            if camera is not None:
+                ok, frame, seq = camera.read(last_seq)
                 if not ok:
                     print("[ERRO] A webcam parou de enviar imagens.", file=sys.stderr)
                     break
                 frame = cv2.flip(frame, 1)
             else:
-                frame = still.copy()
+                frame, seq = still, last_seq + 1
             frame = resize_to_width(frame, args.width)
 
-            targets, hand_list, readings = sensors.detect(frame)
+            # Só manda para os detectores quando a câmera trouxe um quadro novo.
+            if seq != last_seq:
+                worker.submit(resize_to_width(frame, args.detect_width))
+                last_seq = seq
+            targets, hand_list, readings = worker.latest()
 
             now = time.monotonic()
             fps = 0.9 * fps + 0.1 * (1.0 / max(now - last, 1e-6))
             last = now
             elapsed = int(now - started)
-            info = {"fps": fps, "uptime": f"{elapsed // 60:02d}:{elapsed % 60:02d}",
-                    "hint": "H: ajuda"}
+            info = {"fps": fps, "det_rate": worker.rate,
+                    "uptime": f"{elapsed // 60:02d}:{elapsed % 60:02d}",
+                    "hint": "H: ajuda", "sensors": sensors.enabled}
 
             while not terminal_lines.empty():
                 wolf.ask(terminal_lines.get(), sensors_summary(readings))
 
             wolf_state = dict(wolf.snapshot(), typing=typing, input=typed)
-            view = render(frame, targets, hand_list, readings, wolf_state, info, show_help, now)
-
-            frame_count += 1
-            if args.snapshot:
-                if frame_count >= SNAPSHOT_FRAMES:
-                    cv2.imwrite(args.snapshot, view)
-                    print(f"HUD salvo em {args.snapshot} | sensores: {sensors_summary(readings)}")
-                    break
-                continue
-
+            view = render(frame, targets, hand_list, readings, wolf_state, info, show_help, now,
+                          lens=lens)
             cv2.imshow(WINDOW, view)
             key = cv2.waitKey(1) & 0xFF
             if key == 255:
@@ -323,10 +470,16 @@ def main():
                          sensors_summary(readings), encode_scan(frame))
             elif key in (ord("h"), ord("H")):
                 show_help = not show_help
+            elif key in (ord("l"), ord("L")):
+                lens = not lens
+            elif chr(key) in DETECTOR_KEYS:
+                name = DETECTOR_KEYS[chr(key)]
+                sensors.enabled[name] = not sensors.enabled[name]
     finally:
+        worker.stop()
         sensors.close()
-        if cap is not None:
-            cap.release()
+        if camera is not None:
+            camera.release()
         cv2.destroyAllWindows()
 
 

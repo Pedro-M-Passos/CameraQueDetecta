@@ -86,7 +86,16 @@ def wrap_text(text, max_width, scale=0.5):
 # Efeito da lente
 # ---------------------------------------------------------------------------
 
+# Tingimento como uma única matriz de cor: cada canal = parte da cor original + parte do cinza
+# levado para o vermelho. Uma operação cv2.transform é ~15x mais rápida que fazer em numpy.
+_GRAY_WEIGHTS = np.array([0.114, 0.587, 0.299], dtype=np.float32)   # B, G, R
+_RED_TINT = np.array([0.35, 0.35, 1.0], dtype=np.float32)
+_TINT_MATRIX = ((1 - TINT_STRENGTH) * np.eye(3, dtype=np.float32)
+                + TINT_STRENGTH * np.outer(_RED_TINT, _GRAY_WEIGHTS))
+
+
 def _vignette(h, w):
+    """Máscara (uint8, 3 canais) com bordas escuras e linhas de varredura, calculada uma vez."""
     key = (h, w)
     if key not in _vignette_cache:
         ys, xs = np.ogrid[:h, :w]
@@ -94,19 +103,16 @@ def _vignette(h, w):
         mask = 1 - VIGNETTE_STRENGTH * np.clip(dist - 0.55, 0, 1)
         scan = np.ones((h, 1), dtype=np.float32)
         scan[::3] = 1 - SCANLINE_DARKEN
-        _vignette_cache[key] = (mask[..., None] * scan[..., None]).astype(np.float32)
+        mask = np.clip(mask * scan * 255, 0, 255).astype(np.uint8)
+        _vignette_cache[key] = cv2.merge([mask, mask, mask])
     return _vignette_cache[key]
 
 
 def apply_lens(frame):
     """Tinge a imagem de vermelho, escurece as bordas e adiciona linhas de varredura."""
     h, w = frame.shape[:2]
-    out = frame.astype(np.float32)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)[..., None]
-    red_tint = gray * np.array([0.35, 0.35, 1.0], dtype=np.float32)
-    out = out * (1 - TINT_STRENGTH) + red_tint * TINT_STRENGTH
-    out *= _vignette(h, w)
-    return np.clip(out, 0, 255).astype(np.uint8)
+    tinted = cv2.transform(frame, _TINT_MATRIX)
+    return cv2.multiply(tinted, _vignette(h, w), scale=1 / 255)
 
 
 # ---------------------------------------------------------------------------
@@ -176,17 +182,20 @@ def draw_readouts(img, info, t):
     put(img, f"FPS {info['fps']:5.1f}", (36, 86), 0.45)
     put(img, f"ALVOS {info['targets']:02d}", (36, 106), 0.45)
     put(img, f"BIO {'DETECTADO' if info['face'] else '--'}", (36, 126), 0.45)
+    put(img, f"SENSORES {info['det_rate']:4.1f}/s", (36, 146), 0.45, GREY)
 
+    sensors = info["sensors"]
     right = [
-        f"MAOS {info['hands']}",
-        f"OBJ {info['objects']}",
+        f"[1] ROSTO {'ON' if sensors['face'] else 'OFF'}",
+        f"[2] MAOS {info['hands'] if sensors['hands'] else 'OFF'}",
+        f"[3] OBJ {info['objects'] if sensors['objects'] else 'OFF'}",
         f"T+ {info['uptime']}",
     ]
     for i, line in enumerate(right):
         put(img, line, (w - 36 - text_width(line, 0.45), 62 + i * 20), 0.45)
 
     # Barra de energia vertical à esquerda, com um leve "respiro"
-    bx, by, bh = 40, 160, int(h * 0.35)
+    bx, by, bh = 40, 170, int(h * 0.35)
     level = 0.72 + 0.08 * math.sin(t * 1.5)
     cv2.rectangle(img, (bx, by), (bx + 10, by + bh), RED_DIM, 1, LINE)
     fill = int(bh * level)
@@ -264,6 +273,8 @@ def draw_help(img):
     keys = [
         ("T / ENTER", "abrir o canal com o Wolf (digite e ENTER envia)"),
         ("V", "enviar a imagem atual para o Wolf analisar"),
+        ("1 / 2 / 3", "ligar/desligar rosto, maos e objetos (mais FPS)"),
+        ("L", "ligar/desligar o efeito da lente (mais FPS)"),
         ("H", "mostrar/esconder esta ajuda"),
         ("ESC", "sair (ou cancelar a digitacao)"),
     ]

@@ -51,8 +51,26 @@ $env:WOLF_BACKEND = "ollama"           # força o Ollama mesmo com a chave defin
 |-------|------|
 | `T` ou `ENTER` | abre o canal com o Wolf; digite e aperte `ENTER` para enviar |
 | `V` | envia a imagem atual da câmera para o Wolf analisar |
+| `1` / `2` / `3` | liga/desliga os detectores de rosto, mãos e objetos |
+| `L` | liga/desliga o efeito da lente |
 | `H` | mostra/esconde a ajuda |
 | `ESC` | sai (ou cancela a digitação) |
+
+### Mais FPS
+
+A câmera e os detectores rodam em paralelo: o vídeo continua fluido mesmo quando a detecção
+é mais lenta, e as miras usam o último resultado pronto. No canto superior esquerdo,
+`FPS` é a fluidez da janela e `SENSORES` é quantas vezes por segundo a detecção roda.
+Se ainda estiver lento:
+
+| O que fazer | Ganho |
+|-------------|-------|
+| Tecla `3` (ou `--no-objects`): desliga o detector de objetos | o maior ganho na detecção |
+| Teclas `1` e `2`: desligam rosto ou mãos | médio |
+| Tecla `L` (ou `--no-lens`): desliga o efeito vermelho da lente | pequeno |
+| `--object-every 6`: objetos só a cada 6 quadros (padrão 3) | médio |
+| `--width 960`: janela menor | pequeno |
+| Feche o Ollama quando não estiver falando com o Wolf | ajuda em PCs sem placa de vídeo |
 
 A janela do OpenCV não aceita acentos; para escrever com acentos, digite a mensagem
 no próprio terminal do PowerShell e aperte `ENTER`.
