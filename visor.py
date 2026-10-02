@@ -175,6 +175,40 @@ class Sensors:
         return targets, hand_list, readings
 
 
+class ObjectCard:
+    """Escolhe o que a ficha "BANCO DE DADOS" mostra.
+
+    O objeto que o Wolf nomeou na análise de imagem (tecla V) tem prioridade por WOLF_HOLD
+    segundos; ele reconhece qualquer coisa, inclusive canetas, que o detector não conhece. Fora
+    isso, mostra o objeto mais confiável do detector (pessoas ficam de fora) e o segura por
+    alguns segundos depois que ele some, para a ficha não piscar.
+    """
+
+    WOLF_HOLD = 20.0
+    DETECTOR_HOLD = 3.0
+
+    def __init__(self):
+        self.entry = None
+        self.seen = 0.0
+
+    def update(self, readings, identified, now):
+        best = None
+        if identified and now - identified[1] < self.WOLF_HOLD:
+            best = {"name": identified[0], "source": "WOLF", "score": None}
+        else:
+            objects = [o for o in readings["objects"] if o[0] != OBJECT_NAMES["person"]]
+            if objects:
+                name, score = max(objects, key=lambda o: o[1])
+                best = {"name": name, "source": "DETECTOR", "score": score}
+        if best:
+            same = self.entry and self.entry["name"] == best["name"]
+            self.entry = dict(best, since=self.entry["since"] if same else now)
+            self.seen = now
+        elif self.entry and now - self.seen > self.DETECTOR_HOLD:
+            self.entry = None
+        return self.entry
+
+
 EMPTY_READINGS = {"face": False, "hands": 0, "objects": [], "gesture": None}
 
 
@@ -292,7 +326,7 @@ def draw_hand_skeleton(img, hand):
         cv2.circle(img, p, 2, hud.WHITE, -1, cv2.LINE_AA)
 
 
-def render(frame, targets, hand_list, readings, wolf_state, info, show_help, t, lens=True):
+def render(frame, targets, hand_list, readings, wolf_state, info, show_help, t, lens=True, card=None):
     """Monta a imagem final do visor no tamanho da janela."""
     view = hud.apply_lens(frame) if lens else frame.copy()
     h, w = view.shape[:2]
@@ -307,6 +341,7 @@ def render(frame, targets, hand_list, readings, wolf_state, info, show_help, t, 
     hud.draw_readouts(view, dict(info, targets=len(targets), face=readings["face"],
                                  hands=readings["hands"], objects=len(readings["objects"]),
                                  gesture=readings["gesture"]), t)
+    hud.draw_object_card(view, card, t)
     hud.draw_wolf_panel(view, wolf_state, t)
     if show_help:
         hud.draw_help(view)
@@ -382,8 +417,12 @@ def run_snapshot(args, still, wolf):
     info = {"fps": 0.0, "det_rate": 0.0, "uptime": "00:00", "hint": "H: ajuda",
             "sensors": sensors.enabled}
     wolf_state = dict(wolf.snapshot(), typing=False, input="", speaking=False, voice=True)
-    view = render(frame, targets, hand_list, readings, wolf_state, info, False, time.monotonic(),
-                  lens=not args.no_lens)
+    now = time.monotonic()
+    card = ObjectCard().update(readings, wolf_state["identified"], now)
+    if card:
+        card["since"] = now - 10     # sem animação na imagem salva
+    view = render(frame, targets, hand_list, readings, wolf_state, info, False, now,
+                  lens=not args.no_lens, card=card)
     cv2.imwrite(args.snapshot, view)
     print(f"HUD salvo em {args.snapshot} | sensores: {sensors_summary(readings)}")
 
@@ -418,6 +457,7 @@ def main():
     sensors.enabled["objects"] = not args.no_objects
     worker = DetectionWorker(sensors)
     typing, typed, show_help, lens = False, "", False, not args.no_lens
+    object_card = ObjectCard()
     started = last = time.monotonic()
     fps = 0.0
     last_seq = -1
@@ -453,8 +493,9 @@ def main():
 
             wolf_state = dict(wolf.snapshot(), typing=typing, input=typed,
                               speaking=voice.speaking, voice=voice.enabled)
+            card = object_card.update(readings, wolf_state["identified"], now)
             view = render(frame, targets, hand_list, readings, wolf_state, info, show_help, now,
-                          lens=lens)
+                          lens=lens, card=card)
             cv2.imshow(WINDOW, view)
             key = cv2.waitKey(1) & 0xFF
             if key == 255:
@@ -476,7 +517,8 @@ def main():
             elif key in ENTER_KEYS or key in (ord("t"), ord("T")):
                 typing, typed = True, ""
             elif key in (ord("v"), ord("V")):
-                wolf.ask("Analise a cena que o visor está vendo agora.",
+                wolf.ask("Analise a cena que o visor está vendo agora e identifique o objeto "
+                         "principal que estou mostrando.",
                          sensors_summary(readings), encode_scan(frame))
             elif key in (ord("h"), ord("H")):
                 show_help = not show_help

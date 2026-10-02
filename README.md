@@ -50,12 +50,27 @@ $env:WOLF_BACKEND = "ollama"           # força o Ollama mesmo com a chave defin
 | Tecla | Ação |
 |-------|------|
 | `T` ou `ENTER` | abre o canal com o Wolf; digite e aperte `ENTER` para enviar |
-| `V` | envia a imagem atual da câmera para o Wolf analisar |
+| `V` | envia a imagem atual da câmera para o Wolf analisar (e mostra o ícone do objeto) |
 | `M` | liga/desliga a voz do Wolf |
 | `1` / `2` / `3` | liga/desliga os detectores de rosto, mãos e objetos |
 | `L` | liga/desliga o efeito da lente |
 | `H` | mostra/esconde a ajuda |
 | `ESC` | sai (ou cancela a digitação) |
+
+### Ficha do objeto (banco de dados)
+
+No canto direito, abaixo dos sensores, a ficha **BANCO DE DADOS** mostra um ícone simples do
+objeto identificado:
+
+- **Automático:** o objeto mais confiável do detector (celular, copo, garrafa, notebook,
+  tesoura, livro...). Pessoas ficam de fora.
+- **Com a tecla `V`:** o Wolf olha a imagem e nomeia o objeto principal que você está
+  mostrando, inclusive coisas que o detector não conhece, como uma **caneta**. Essa
+  identificação fica na ficha por 20 segundos.
+
+Os ícones são desenhados com linhas pelo próprio programa (nada para baixar) e ficam em
+`visor_icons.py`. Objetos sem ícone aparecem como um cubo com "?". Para criar um novo, adicione
+as formas em `ICONS` e os nomes que o chamam em `ALIASES`.
 
 ### Mais FPS
 

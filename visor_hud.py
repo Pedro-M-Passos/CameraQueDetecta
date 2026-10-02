@@ -1,4 +1,4 @@
-"""Desenho do HUD do visor: tingimento da lente, moldura, miras nos alvos, leituras e painel do Wolf.
+"""Desenho do HUD do visor: lente, moldura, miras, leituras, ficha do objeto e painel do Wolf.
 
 Tudo é desenhado com OpenCV puro. As fontes Hershey do OpenCV não têm acentos, então os textos
 passam por ascii_text() antes de ir para a tela (o terminal continua mostrando o texto completo).
@@ -9,6 +9,8 @@ import unicodedata
 
 import cv2
 import numpy as np
+
+import visor_icons
 
 # Cores em BGR
 RED = (50, 40, 235)
@@ -213,6 +215,66 @@ def draw_readouts(img, info, t):
 
 
 # ---------------------------------------------------------------------------
+# Ficha do objeto identificado
+# ---------------------------------------------------------------------------
+
+SCAN_SECONDS = 0.8   # duração da animação que "desenha" o ícone quando o objeto muda
+
+
+def draw_object_card(img, entry, t):
+    """Ficha no lado direito com um ícone simples do objeto identificado.
+
+    entry: dict com name, source ("DETECTOR" ou "WOLF"), score (ou None) e since (instante em
+    que apareceu). None não desenha nada.
+    """
+    if not entry:
+        return
+    h, w = img.shape[:2]
+    cw = 190
+    size = 130
+    ch = size + 86
+    x1, y1 = w - 36 - cw, 150
+    # Não invade o painel do Wolf (canto inferior direito).
+    wolf_top = h - int(min(300, h * 0.46)) - 30
+    if y1 + ch > wolf_top - 8:
+        return
+    x2, y2 = x1 + cw, y1 + ch
+    blend_rect(img, x1, y1, x2, y2, BLACK, 0.6)
+    corner_box(img, x1, y1, x2, y2, RED, length=14, thickness=2)
+    put(img, "BANCO DE DADOS", (x1 + 10, y1 + 18), 0.45, RED, 1)
+
+    # Quadro do ícone com uma grade discreta
+    ix, iy = x1 + (cw - size) // 2, y1 + 28
+    for k in range(1, 4):
+        cv2.line(img, (ix + k * size // 4, iy), (ix + k * size // 4, iy + size), RED_DIM, 1)
+        cv2.line(img, (ix, iy + k * size // 4), (ix + size, iy + k * size // 4), RED_DIM, 1)
+    cv2.rectangle(img, (ix, iy), (ix + size, iy + size), RED_DIM, 1, LINE)
+
+    tile = visor_icons.icon_tile(visor_icons.icon_for(entry["name"]), size)
+    progress = min(1.0, (t - entry["since"]) / SCAN_SECONDS)
+    rows = int(size * progress)            # o ícone aparece de cima para baixo
+    if rows > 0:
+        roi = img[iy:iy + rows, ix:ix + size]
+        part = tile[:rows]
+        mask = part.any(axis=2)
+        roi[mask] = part[mask]
+    if progress < 1.0:
+        cv2.line(img, (ix - 4, iy + rows), (ix + size + 4, iy + rows), RED, 2, LINE)
+        status = "ANALISANDO..."
+    else:
+        status = "IDENTIFICADO"
+
+    name = entry["name"].upper()
+    while text_width(name, 0.55, 2) > cw - 20 and len(name) > 4:
+        name = name[:-2] + "."
+    put(img, name, (x1 + 10, iy + size + 22), 0.55, WHITE, 2)
+    source = entry["source"]
+    if entry.get("score") is not None:
+        source += f" {entry['score'] * 100:.0f}%"
+    put(img, f"{status} // {source}", (x1 + 10, iy + size + 42), 0.38, GREY)
+
+
+# ---------------------------------------------------------------------------
 # Painel do Wolf
 # ---------------------------------------------------------------------------
 
@@ -280,7 +342,7 @@ def draw_help(img):
     h, w = img.shape[:2]
     keys = [
         ("T / ENTER", "abrir o canal com o Wolf (digite e ENTER envia)"),
-        ("V", "enviar a imagem atual para o Wolf analisar"),
+        ("V", "Wolf analisa a imagem e mostra o objeto principal"),
         ("M / N / F", "voz do Wolf: ligar/desligar, trocar voz, trocar efeito"),
         ("1 / 2 / 3", "ligar/desligar rosto, maos e objetos (mais FPS)"),
         ("L", "ligar/desligar o efeito da lente (mais FPS)"),

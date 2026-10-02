@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import re
+import time
 import unicodedata
 import threading
 import urllib.error
@@ -68,11 +69,30 @@ de uma frase em português (nomes de jogos, termos técnicos, gírias) não muda
 descrevendo o que o visor detecta agora (rostos, mãos, objetos, gesto). Use essas leituras \
 para responder e nunca invente detecções que não estão lá. Se vier uma imagem, descreva o \
 que importa nela.
+- Sempre que vier uma imagem, termine a resposta com uma linha separada no formato \
+[OBJETO: nome], com o nome curto, em português e no singular, do objeto principal que o \
+parceiro está mostrando (ex.: [OBJETO: caneta], [OBJETO: celular]). Se não houver um objeto \
+claro, use [OBJETO: nenhum]. O visor usa essa linha para mostrar um ícone; não comente sobre ela.
 - Não comece respostas relatando os sensores e não repita leituras em toda mensagem. Fora \
 das perguntas sobre a cena, apenas converse.
 - Este visor é um protótipo de interface feito por um entusiasta. Se pedirem algo perigoso de \
 verdade, recuse no seu estilo e ofereça uma alternativa segura.
 """
+
+
+# Linha que o Wolf coloca no fim da análise de imagem: [OBJETO: caneta]
+OBJECT_TAG = re.compile(r"\[?\s*OBJ(?:ETO|ECT)\s*:\s*([^\]\n]*)\]?", re.IGNORECASE)
+NO_OBJECT = {"", "nenhum", "nenhuma", "none", "nada", "nothing"}
+
+
+def extract_object(reply):
+    """Separa a etiqueta [OBJETO: nome] da resposta. Retorna (texto limpo, nome ou None)."""
+    names = OBJECT_TAG.findall(reply)
+    if not names:
+        return reply, None
+    clean = OBJECT_TAG.sub("", reply).strip()
+    name = names[-1].strip().strip(".").strip()
+    return clean or "...", (None if name.lower() in NO_OBJECT else name)
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +304,7 @@ class Wolf:
         self.busy = False
         self.ready = False        # o cérebro respondeu ao último teste/pergunta
         self.fixed_language = None  # "en"/"pt" quando o parceiro pediu um idioma
+        self.identified = None    # (nome, instante) do último objeto que o Wolf nomeou na imagem
         self._print = printer
         self._lock = threading.Lock()
 
@@ -309,7 +330,7 @@ class Wolf:
         """Estado para o HUD desenhar (cópia, para não conflitar com a thread)."""
         with self._lock:
             return {"log": list(self.log), "online": self.ready,
-                    "status": self.status, "busy": self.busy}
+                    "status": self.status, "busy": self.busy, "identified": self.identified}
 
     def ask(self, question, sensors=None, image_jpeg=None):
         """Envia uma pergunta em segundo plano. Retorna False se o Wolf ainda está respondendo.
@@ -366,6 +387,10 @@ class Wolf:
         else:
             self.ready = True
             reply = reply or "..."
+            if image_jpeg is not None:
+                reply, obj = extract_object(reply)
+                with self._lock:
+                    self.identified = (obj, time.monotonic()) if obj else None
             # O histórico guarda só a pergunta: leituras e imagem antigas não são reenviadas,
             # assim o modelo não se apega a elas nas respostas seguintes.
             note = " (imagem do visor enviada)" if image_jpeg else ""
