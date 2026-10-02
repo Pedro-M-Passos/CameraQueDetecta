@@ -80,6 +80,13 @@ Quando a pergunta é sobre a cena ("o que você vê?", "o que tem na minha mão?
 "quantas pessoas tem aqui?") ou quando você aperta `V`, o Wolf recebe junto o que os
 sensores detectam. Nas outras mensagens ele só conversa, sem relatar os sensores.
 
+### Idioma
+
+O Wolf responde em português. Se você escrever em inglês, ele responde em inglês (e fala com
+uma voz inglesa, se houver uma instalada). Palavras soltas em inglês numa frase em português
+("o boss fight do game") não mudam o idioma. Para fixar o idioma, peça: "responda em inglês"
+ou "volte a falar em português".
+
 ### Voz do Wolf
 
 O Wolf fala as respostas em voz alta com um efeito robótico. Não precisa instalar nada:

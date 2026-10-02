@@ -10,6 +10,7 @@ Como funciona:
 
 Tudo roda numa thread própria, então o vídeo não trava enquanto o Wolf fala.
 No visor: M liga/desliga a voz, N troca de voz, F troca o efeito. A escolha fica salva.
+Quando o Wolf responde em inglês, uma voz inglesa instalada é usada automaticamente.
 
 Autoteste e lista de vozes (no terminal):
     python voice.py --vozes            lista as vozes instaladas
@@ -383,20 +384,21 @@ class Voice:
             import winsound
             winsound.PlaySound(None, winsound.SND_PURGE)
 
-    def speak(self, text):
+    def speak(self, text, lang="pt"):
+        """Fala o texto. lang ("pt"/"en") escolhe uma voz do idioma se a atual for de outro."""
         text = clean_for_speech(text)
         if self.enabled and text:
-            self._put(("say", text))
+            self._put(("say", text, lang))
 
     def next_voice(self):
         """Passa para a próxima voz instalada e fala uma amostra."""
-        self._put(("next_voice", None))
+        self._put(("next_voice", None, None))
 
     def next_effect(self):
         self.effect = EFFECT_ORDER[(EFFECT_ORDER.index(self.effect) + 1) % len(EFFECT_ORDER)]
         self._save()
         self._print(f"[Wolf] efeito da voz: {self.effect}")
-        self._put(("say", f"Efeito {self.effect}."))
+        self._put(("say", f"Efeito {self.effect}.", None))
 
     # ------------------------------------------------------------------
 
@@ -421,13 +423,20 @@ class Voice:
                 self._print(f"[Wolf] voz: {self.voice['name']} ({self.voice['lang']}) | "
                             f"{len(self.voices)} vozes instaladas, tecla N troca")
 
-    def render(self, text):
+    def voice_for(self, lang):
+        """A voz escolhida, ou (se ela for de outro idioma) a primeira instalada do idioma pedido."""
+        if not lang or self.voice is None or self.voice["lang"].lower().startswith(lang):
+            return self.voice
+        same = [v for v in self.voices if v["lang"].lower().startswith(lang)]
+        return same[0] if same else self.voice
+
+    def render(self, text, lang=None):
         """Sintetiza + aplica efeitos. Retorna (caminho do .wav, duração em segundos)."""
         self._ensure_voices()
         self._count += 1
         raw = os.path.join(self._dir, f"bruto_{self._count % 4}.wav")
         out = os.path.join(self._dir, f"wolf_{self._count % 4}.wav")
-        synthesize(text, raw, self.voice, self.speed)
+        synthesize(text, raw, self.voice_for(lang), self.speed)
         audio, rate = read_wav(raw)
         audio = apply_effect(audio, rate, self.effect)
         write_wav(out, audio, rate)
@@ -435,7 +444,7 @@ class Voice:
 
     def _loop(self):
         while True:
-            kind, text = self._queue.get()
+            kind, text, lang = self._queue.get()
             try:
                 if kind == "next_voice":
                     self._ensure_voices()
@@ -449,7 +458,7 @@ class Voice:
                     text = f"Voz {self.voice['name'].replace('Microsoft', '')}."
                 if not self.enabled:
                     continue
-                path, seconds = self.render(text)
+                path, seconds = self.render(text, lang)
                 if self.enabled and play(path):
                     self.speaking_until = time.monotonic() + seconds
             except Exception as exc:  # noqa: BLE001 - a voz nunca derruba o visor

@@ -60,7 +60,10 @@ Personalidade:
 - Não cita falas de jogos, filmes ou séries. Fala com a própria voz.
 
 Como responder:
-- Português do Brasil, no máximo três frases curtas: o texto aparece num painel pequeno do HUD.
+- No máximo três frases curtas: o texto aparece num painel pequeno do HUD.
+- Idioma: responda em português do Brasil. Quando a mensagem trouxer [IDIOMA: inglês], \
+responda inteiramente em inglês, com a mesma personalidade. Palavras soltas em inglês dentro \
+de uma frase em português (nomes de jogos, termos técnicos, gírias) não mudam o idioma.
 - Quando o parceiro pergunta sobre a cena, a mensagem vem com uma linha [SENSORES] \
 descrevendo o que o visor detecta agora (rostos, mãos, objetos, gesto). Use essas leituras \
 para responder e nunca invente detecções que não estão lá. Se vier uma imagem, descreva o \
@@ -212,10 +215,64 @@ SCENE_WORDS = re.compile(
     r"quem|quant\w*|onde|frente|aparec\w*|mostr\w*|pessoa\w*|scan\w*|analis\w*|identific\w*)\b")
 
 
+SCENE_WORDS_EN = re.compile(
+    r"\b(see|seeing|saw|look\w*|watch\w*|camera|scene|visor|sensor\w*|detect\w*|face\w*|"
+    r"hand\w*|finger\w*|gesture\w*|object\w*|holding|here|this|who|how many|where|"
+    r"front|show\w*|people|person|scan\w*|analy[sz]\w*|identif\w*)\b")
+
+
+def _plain(text):
+    return unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode()
+
+
 def asks_about_scene(question):
     """True se a pergunta parece ser sobre o que o visor está vendo."""
-    plain = unicodedata.normalize("NFKD", question.lower()).encode("ascii", "ignore").decode()
-    return bool(SCENE_WORDS.search(plain))
+    plain = _plain(question)
+    return bool(SCENE_WORDS.search(plain) or SCENE_WORDS_EN.search(plain))
+
+
+# Palavras muito comuns de cada idioma. Termos soltos ("game", "bug", "online") não estão aqui,
+# então uma frase em português com algumas palavras em inglês continua em português.
+PT_WORDS = set("""
+o os as de do da dos das que e em um uma uns umas voce vc nao sim por para pra com como qual
+quais quem isso isto esse essa este esta estou esta eu meu minha seu sua tem ter tenho ser sou
+foi mais muito quando onde porque porque se ao no na nos nas ele ela eles elas nos ja ainda
+tambem sobre te lhe qualquer algo alguem tudo nada agora hoje oi ola obrigado valeu tchau
+""".split())
+EN_WORDS = set("""
+the is are am was were be been you your yours what who how why where when do does did can could
+would should will i my mine it its this that these those to of and in on at with for from please
+tell about an have has had there they them we our hello hi hey thanks thank yes not just
+know think like want need going doing
+""".split())
+EN_REQUEST = re.compile(r"\b(ingles|english)\b")
+PT_REQUEST = re.compile(r"\b(portugues|portuguese)\b")
+REQUEST_VERBS = re.compile(r"\b(respond\w*|fal\w*|convers\w*|escrev\w*|speak|talk|answer|"
+                           r"reply|write|use|usar|mud\w*|switch|troc\w*|volt\w*)\b")
+
+
+def detect_language(text):
+    """'en' se a mensagem foi escrita em inglês, 'pt' caso contrário."""
+    plain = _plain(text)
+    words = re.findall(r"[a-z']+", plain)
+    accents = text != plain and any(c in text.lower() for c in "ãõçáéíóúâêôà")
+    pt = sum(w in PT_WORDS for w in words) + (2 if accents else 0)
+    en = sum(w in EN_WORDS for w in words)
+    if pt == 0:                    # "hello", "tell me a joke"
+        return "en" if en >= 1 else "pt"
+    return "en" if en >= 2 and en > pt * 1.5 else "pt"
+
+
+def language_request(text):
+    """'en' ou 'pt' se a mensagem pede para mudar o idioma das respostas; senão None."""
+    plain = _plain(text)
+    if not REQUEST_VERBS.search(plain):
+        return None
+    if EN_REQUEST.search(plain):
+        return "en"
+    if PT_REQUEST.search(plain):
+        return "pt"
+    return None
 
 
 class Wolf:
@@ -226,6 +283,7 @@ class Wolf:
         self.history = []
         self.busy = False
         self.ready = False        # o cérebro respondeu ao último teste/pergunta
+        self.fixed_language = None  # "en"/"pt" quando o parceiro pediu um idioma
         self._print = printer
         self._lock = threading.Lock()
 
@@ -272,16 +330,30 @@ class Wolf:
 
     # ------------------------------------------------------------------
 
-    def _add(self, speaker, text, speak=False):
+    def reply_language(self, question):
+        """Idioma da resposta: pedido explícito ("responda em inglês") fica valendo; sem
+        pedido, segue o idioma em que a mensagem foi escrita."""
+        requested = language_request(question)
+        if requested:
+            self.fixed_language = None if requested == "pt" else requested
+            return requested
+        if self.fixed_language:
+            return self.fixed_language
+        return detect_language(question)
+
+    def _add(self, speaker, text, speak=False, lang="pt"):
         with self._lock:
             self.log.append((speaker, text))
         self._print(f"{'Wolf' if speaker == 'wolf' else 'Você'}: {text}")
         if speak and self.on_speak:
-            self.on_speak(text)
+            self.on_speak(text, lang)
 
     def _run(self, question, sensors, image_jpeg):
         with_sensors = bool(sensors) and (image_jpeg is not None or asks_about_scene(question))
         text = f"[SENSORES] {sensors}\n\n{question}" if with_sensors else question
+        lang = self.reply_language(question)
+        if lang == "en":
+            text += "\n\n[IDIOMA: inglês]"
         image_b64 = base64.standard_b64encode(image_jpeg).decode("ascii") if image_jpeg else None
         try:
             reply = self.backend.chat(SYSTEM_PROMPT, self.history + [{"role": "user", "content": text}],
@@ -301,6 +373,6 @@ class Wolf:
             self.history += [{"role": "user", "content": question + note},
                              {"role": "assistant", "content": reply}]
             self.history = self.history[-HISTORY_TURNS * 2:]
-            self._add("wolf", reply, speak=True)
+            self._add("wolf", reply, speak=True, lang=lang)
         with self._lock:
             self.busy = False
