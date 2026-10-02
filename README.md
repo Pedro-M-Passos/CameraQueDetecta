@@ -82,39 +82,33 @@ sensores detectam. Nas outras mensagens ele só conversa, sem relatar os sensore
 
 ### Voz do Wolf
 
-O Wolf fala as respostas em voz alta com um efeito robótico (mais grave, metálico, com
-filtro de rádio). Não precisa instalar nada: no Windows ele usa a voz do próprio sistema.
-Se a voz sair com sotaque em inglês, instale a voz em português em
-*Configurações > Hora e idioma > Fala > Adicionar vozes > Português (Brasil)*.
+O Wolf fala as respostas em voz alta com um efeito robótico. Não precisa instalar nada:
+no Windows ele usa as vozes do próprio sistema.
+
+| Tecla | Ação |
+|-------|------|
+| `M` | liga/desliga a voz |
+| `N` | troca para a próxima voz instalada (ela fala o próprio nome) |
+| `F` | troca o efeito: `robo` → `leve` → `nenhum` |
+
+A voz e o efeito escolhidos ficam salvos em `.wolf_voz.json`.
+
+Para ver e ouvir as vozes instaladas pelo terminal:
 
 ```powershell
-python visor.py --no-voice           # começa sem voz (a tecla M liga/desliga)
-$env:WOLF_VOICE_NAME = "Daniel"      # escolhe outra voz instalada pelo nome
+python voice.py --vozes    # lista as vozes
+python voice.py --ouvir    # cada voz fala o próprio nome
+python voice.py "teste"    # testa a voz atual (e mostra onde parou se algo falhar)
 ```
 
-Os ajustes do efeito (grave, metálico, eco, filtro) ficam no topo de `voice.py`.
+Mais vozes: *Configurações > Hora e idioma > Fala > Adicionar vozes*. Vozes de outros
+idiomas também funcionam, mas falam português com sotaque.
 
-Se o Wolf não falar, rode o autoteste. Ele lista as vozes instaladas, gera uma fala,
-toca a voz normal e depois a do Wolf, e mostra em qual etapa parou se algo falhar:
+Velocidade da fala (1.0 = normal; o padrão é 1.1):
 
 ```powershell
-python voice.py "teste de voz"
+$env:WOLF_VOICE_SPEED = "1.25"
 ```
-
-Opções úteis:
-
-```powershell
-python visor.py --camera 1                 # outra webcam
-python visor.py --image foto.jpg           # usa uma foto no lugar da webcam
-python visor.py --image foto.jpg --snapshot saida.png   # salva o HUD e sai
-```
-
-Arquivos:
-
-- `visor.py`: laço principal, sensores (rosto e mãos do MemeCV + detector de objetos) e teclado.
-- `visor_hud.py`: desenho do HUD (lente, moldura, miras, leituras, painel do Wolf).
-- `wolf.py`: personalidade do Wolf e conversa pelo Ollama (padrão) ou pela API do Claude.
-- `voice.py`: voz robótica do Wolf (síntese do sistema + efeitos em numpy).
 
 ## MemeCV
 

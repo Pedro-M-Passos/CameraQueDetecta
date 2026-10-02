@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .venv/
 models/
+.wolf_voz.json

@@ -281,7 +281,7 @@ def draw_help(img):
     keys = [
         ("T / ENTER", "abrir o canal com o Wolf (digite e ENTER envia)"),
         ("V", "enviar a imagem atual para o Wolf analisar"),
-        ("M", "ligar/desligar a voz do Wolf"),
+        ("M / N / F", "voz do Wolf: ligar/desligar, trocar voz, trocar efeito"),
         ("1 / 2 / 3", "ligar/desligar rosto, maos e objetos (mais FPS)"),
         ("L", "ligar/desligar o efeito da lente (mais FPS)"),
         ("H", "mostrar/esconder esta ajuda"),

@@ -20,7 +20,7 @@ Opções:
     --no-voice            começa com a voz do Wolf desligada
 
 Teclas: T ou ENTER fala com o Wolf, V manda a imagem atual para ele analisar,
-M liga e desliga a voz do Wolf, 1/2/3 ligam e desligam rosto, mãos e objetos, L liga e desliga o efeito da lente,
+M liga e desliga a voz do Wolf, N troca a voz, F troca o efeito da voz, 1/2/3 ligam e desligam rosto, mãos e objetos, L liga e desliga o efeito da lente,
 H mostra a ajuda, ESC sai. Também dá para digitar para o Wolf no próprio terminal.
 
 Reaproveita do MemeCV (main.py) os modelos de rosto e mãos e a classificação de gestos.
@@ -410,7 +410,7 @@ def main():
     camera = None if still is not None else CameraStream(args.camera, args.cam_width, args.cam_height)
     terminal_lines = queue.Queue()
     start_terminal_input(terminal_lines)
-    print("Visor ativo. T/ENTER fala com o Wolf, V analisa a cena, M liga/desliga a voz, "
+    print("Visor ativo. T/ENTER fala com o Wolf, V analisa a cena, M/N/F voz, "
           "1/2/3/L ajustam o FPS, "
           "H ajuda, ESC sai.")
 
@@ -482,6 +482,10 @@ def main():
                 show_help = not show_help
             elif key in (ord("m"), ord("M")):
                 print(f"[Wolf] voz {'ligada' if voice.toggle() else 'desligada'}")
+            elif key in (ord("n"), ord("N")):
+                voice.next_voice()
+            elif key in (ord("f"), ord("F")):
+                voice.next_effect()
             elif key in (ord("l"), ord("L")):
                 lens = not lens
             elif chr(key) in DETECTOR_KEYS:
