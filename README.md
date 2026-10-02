@@ -89,19 +89,8 @@ ou "volte a falar em português".
 
 ### Voz do Wolf
 
-O Wolf fala as respostas em voz alta com um efeito robótico. Sem instalar nada, ele usa as
-vozes do próprio Windows, que soam bem artificiais.
-
-**Recomendado: voz neural Piper** (gratuita, offline, bem mais natural). Instale uma vez:
-
-```powershell
-python voice.py --instalar      # Piper + voz masculina pt-BR "faber" (~90 MB)
-python voice.py --instalar en   # ... e também a voz inglesa "ryan", usada nas respostas em inglês
-```
-
-Se a rede cair, rode o mesmo comando de novo: o download continua de onde parou. Tudo fica na
-pasta `piper/` (fora do git) e a voz do Wolf passa a ser "Piper faber". As vozes do Windows
-continuam disponíveis na tecla `N`.
+O Wolf fala as respostas em voz alta com um efeito robótico. Não precisa instalar nada:
+no Windows ele usa as vozes do próprio sistema.
 
 | Tecla | Ação |
 |-------|------|
@@ -111,9 +100,11 @@ continuam disponíveis na tecla `N`.
 
 A voz e o efeito escolhidos ficam salvos em `.wolf_voz.json`.
 
-O efeito `blade_wolf` (padrão) é inspirado no estilo do personagem: a voz continua natural,
-só um pouco mais grave, com um leve brilho metálico e uma reverberação curta. Para algo bem
-robótico, use `robo`. Os parâmetros ficam no topo de `voice.py`.
+O efeito `blade_wolf` (padrão) é inspirado no estilo do personagem: grave, calmo e com uma
+camada sintética sutil (chorus e reverberação metálica). Ele soa melhor com uma voz masculina
+de base, como Microsoft Daniel (português) ou David (inglês), e com
+`$env:WOLF_VOICE_SPEED = "1.0"` para uma fala mais pausada. Os parâmetros ficam no topo de
+`voice.py`.
 
 Para ver e ouvir as vozes instaladas pelo terminal:
 

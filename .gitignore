@@ -3,4 +3,3 @@ __pycache__/
 .venv/
 models/
 .wolf_voz.json
-piper/
