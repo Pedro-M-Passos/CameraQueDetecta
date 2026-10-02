@@ -44,15 +44,17 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wolf_
 DEFAULT_SPEED = 1.1
 
 # Efeitos (ajuste a gosto). pitch < 1 deixa a voz mais grave, sem mudar a velocidade.
-# Chaves opcionais: chorus_ms/chorus_depth_ms/chorus_hz/chorus_mix (voz "dobrada", sintética)
-# e reverb_mix/reverb_ms (reverberação metálica curta, como dentro de um chassi).
+# Chaves opcionais: chorus_ms/chorus_depth_ms/chorus_hz/chorus_mix (voz "dobrada", sintética),
+# comb_ms/comb_gain (ressonância metálica fixa), presence (realce de 2-4 kHz e 4-8,5 kHz),
+# breath_mix (chiado sintético que acompanha a fala) e reverb_mix/reverb_ms (reverberação metálica).
 EFFECTS = {
     # Inspirado no estilo do Blade Wolf: voz masculina grave, calma e medida, com uma camada
     # sintética sutil. Fica melhor com uma voz masculina de base (ex.: Daniel ou David).
-    "blade_wolf": {"pitch": 0.8, "ring_hz": 70, "ring_mix": 0.12, "echo_ms": 0, "echo_gain": 0,
-                   "band": (90, 6500), "bits": 0,
-                   "chorus_ms": 9, "chorus_depth_ms": 2.5, "chorus_hz": 0.35, "chorus_mix": 0.35,
-                   "reverb_mix": 0.22, "reverb_ms": 140},
+    "blade_wolf": {"pitch": 0.82, "ring_hz": 70, "ring_mix": 0.1, "echo_ms": 0, "echo_gain": 0,
+                   "band": (80, 9000), "bits": 0,
+                   "chorus_ms": 9, "chorus_depth_ms": 2.0, "chorus_hz": 0.35, "chorus_mix": 0.25,
+                   "comb_ms": 10.9, "comb_gain": 0.45, "presence": (1.4, 3.0), "breath_mix": 0.2,
+                   "reverb_mix": 0.3, "reverb_ms": 260},
     "robo": {"pitch": 0.85, "ring_hz": 55, "ring_mix": 0.3, "echo_ms": 14, "echo_gain": 0.3,
              "band": (250, 3800), "bits": 10},
     "leve": {"pitch": 0.93, "ring_hz": 40, "ring_mix": 0.1, "echo_ms": 10, "echo_gain": 0.18,
@@ -310,6 +312,24 @@ def apply_effect(audio, rate, name=DEFAULT_EFFECT):
             n = np.arange(len(audio))
             delay = (fx["chorus_ms"] + fx["chorus_depth_ms"] * np.sin(2 * np.pi * fx["chorus_hz"] * n / rate)) * rate / 1000
             audio = audio + np.interp(n - delay, n, audio, left=0) * fx["chorus_mix"]
+        # Ressonância metálica fixa: soma uma cópia com atraso curto e constante (filtro pente).
+        if fx.get("comb_gain"):
+            d = int(rate * fx["comb_ms"] / 1000)
+            if 0 < d < len(audio):
+                comb = np.zeros_like(audio)
+                comb[d:] = audio[:-d] * fx["comb_gain"]
+                audio = audio + comb
+        # Chiado sintético: ruído só nos agudos, seguindo o volume da fala.
+        if fx.get("breath_mix"):
+            win = max(1, int(rate * 0.02))
+            envelope = np.convolve(np.abs(audio), np.ones(win) / win, mode="same")
+            noise = np.random.default_rng(7).standard_normal(len(audio)).astype(np.float32)
+            noise_spec = np.fft.rfft(noise)
+            nf = np.fft.rfftfreq(len(noise), 1 / rate)
+            noise_spec[(nf < 3000) | (nf > 9000)] = 0
+            noise = np.fft.irfft(noise_spec, n=len(noise))
+            noise /= float(np.max(np.abs(noise))) or 1.0
+            audio = audio + noise * envelope * fx["breath_mix"] * 4
         # Reverberação metálica: reflexões curtas e regulares que somem rápido.
         if fx.get("reverb_mix"):
             audio = audio + metallic_reverb(audio, rate, fx["reverb_ms"]) * fx["reverb_mix"]
@@ -318,6 +338,10 @@ def apply_effect(audio, rate, name=DEFAULT_EFFECT):
         freqs = np.fft.rfftfreq(len(audio), 1 / rate)
         low, high = fx["band"]
         spectrum[(freqs < low) | (freqs > high)] *= 0.08
+        if fx.get("presence"):
+            mid, high_boost = fx["presence"]
+            spectrum[(freqs >= 2000) & (freqs < 4000)] *= mid
+            spectrum[(freqs >= 4000) & (freqs <= 8500)] *= high_boost
         audio = np.fft.irfft(spectrum, n=len(audio))
         if fx["bits"]:
             steps = 2 ** (fx["bits"] - 1)
