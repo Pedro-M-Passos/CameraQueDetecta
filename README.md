@@ -20,12 +20,32 @@ Na primeira execução os modelos do MediaPipe são baixados para `models/`
 
 ## Visor + Wolf
 
-```powershell
-$env:ANTHROPIC_API_KEY = "sua-chave"   # https://console.anthropic.com
-python visor.py
-```
+O Wolf usa por padrão o [Ollama](https://ollama.com), que roda um modelo de IA de graça
+no seu próprio PC. Na primeira vez:
 
-Sem a chave o visor funciona normalmente e o Wolf avisa que está offline.
+1. Instale o Ollama para Windows em https://ollama.com/download e deixe o aplicativo aberto.
+2. Baixe o cérebro do Wolf (~3,3 GB, uma vez só; se a internet cair, rode de novo que ele continua):
+
+   ```powershell
+   ollama pull gemma3:4b
+   ```
+
+3. Rode o visor:
+
+   ```powershell
+   python visor.py
+   ```
+
+Se o Ollama não estiver aberto, o visor funciona normalmente e o Wolf avisa no painel.
+A primeira resposta demora alguns segundos enquanto o modelo carrega.
+
+Outros cérebros (opcional):
+
+```powershell
+$env:WOLF_MODEL = "gemma3:1b"          # mais leve (~0,8 GB), mas sem a tecla V (não enxerga imagens)
+$env:ANTHROPIC_API_KEY = "sua-chave"   # usa o Claude (pago, mais esperto) no lugar do Ollama
+$env:WOLF_BACKEND = "ollama"           # força o Ollama mesmo com a chave definida
+```
 
 | Tecla | Ação |
 |-------|------|
@@ -47,14 +67,13 @@ Opções úteis:
 python visor.py --camera 1                 # outra webcam
 python visor.py --image foto.jpg           # usa uma foto no lugar da webcam
 python visor.py --image foto.jpg --snapshot saida.png   # salva o HUD e sai
-$env:WOLF_MODEL = "claude-haiku-4-5"       # modelo mais barato/rápido para o Wolf
 ```
 
 Arquivos:
 
 - `visor.py`: laço principal, sensores (rosto e mãos do MemeCV + detector de objetos) e teclado.
 - `visor_hud.py`: desenho do HUD (lente, moldura, miras, leituras, painel do Wolf).
-- `wolf.py`: personalidade e conversa do Wolf pela API do Claude.
+- `wolf.py`: personalidade do Wolf e conversa pelo Ollama (padrão) ou pela API do Claude.
 
 ## MemeCV
 

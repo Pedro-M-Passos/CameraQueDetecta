@@ -1,31 +1,46 @@
-"""Wolf: a IA de suporte do visor, conversando pela API do Claude.
+"""Wolf: a IA de suporte do visor.
+
+O "cérebro" do Wolf pode ser:
+  - Ollama (padrão, gratuito): um modelo de linguagem rodando no seu próprio PC.
+  - Claude (opcional, pago): usado quando ANTHROPIC_API_KEY está definida.
 
 As perguntas rodam numa thread separada para o vídeo não travar enquanto o Wolf "pensa".
-Sem ANTHROPIC_API_KEY (ou sem o pacote anthropic) o Wolf fica offline e o visor segue funcionando.
+Se o cérebro escolhido não estiver disponível, o Wolf avisa no painel e o visor segue funcionando.
 
 Variáveis de ambiente:
-    ANTHROPIC_API_KEY   chave da API (https://console.anthropic.com)
-    WOLF_MODEL          modelo a usar (padrão: claude-opus-5-5)
+    WOLF_BACKEND        "ollama" ou "claude" (padrão: claude se houver chave, senão ollama)
+    WOLF_MODEL          modelo a usar (padrão: gemma3:4b no Ollama, claude-opus-5-5 no Claude)
+    OLLAMA_HOST         endereço do Ollama (padrão: http://localhost:11434)
+    ANTHROPIC_API_KEY   chave da API do Claude (https://console.anthropic.com)
 """
 
 import base64
+import json
 import os
 import threading
+import urllib.error
+import urllib.request
 from collections import deque
 
 try:
     import anthropic
-except ImportError:  # o visor roda mesmo sem o pacote
+except ImportError:  # só é necessário para o cérebro Claude
     anthropic = None
 
-DEFAULT_MODEL = "claude-opus-5-5"
-MAX_TOKENS = 2048
-HISTORY_TURNS = 12        # quantas trocas (pergunta + resposta) o Wolf lembra
-LOG_SIZE = 40             # mensagens guardadas para o painel
+# gemma3:4b entende português e imagens (tecla V) e roda num PC comum (~3,3 GB).
+OLLAMA_DEFAULT_MODEL = "gemma3:4b"
+OLLAMA_DEFAULT_HOST = "http://localhost:11434"
+OLLAMA_TIMEOUT = 180      # segundos; a primeira resposta demora enquanto o modelo carrega
+OLLAMA_MAX_TOKENS = 300
 
+CLAUDE_DEFAULT_MODEL = "claude-opus-5-5"
+CLAUDE_MAX_TOKENS = 2048
 # Se o modelo principal recusar um pedido por política, a API tenta de novo num modelo
 # alternativo dentro da mesma chamada.
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CLAUDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+HISTORY_TURNS = 12        # quantas trocas (pergunta + resposta) o Wolf lembra
+LOG_SIZE = 40             # mensagens guardadas para o painel
 
 SYSTEM_PROMPT = """\
 Você é WOLF, a unidade de inteligência artificial de suporte instalada no visor de combate do \
@@ -51,49 +66,168 @@ invente detecções que não estão lá. Se vier uma imagem, descreva o que impo
 verdade, recuse no seu estilo e ofereça uma alternativa segura.
 """
 
-OFFLINE_HELP = ("Link offline. Defina a variável ANTHROPIC_API_KEY e reinicie o visor "
-                "para eu poder responder.")
 
+# ---------------------------------------------------------------------------
+# Cérebros
+# ---------------------------------------------------------------------------
+
+class BackendError(Exception):
+    """Falha com uma mensagem pronta para mostrar no painel."""
+
+
+class OllamaBackend:
+    """Modelo local servido pelo Ollama (https://ollama.com), via HTTP, sem pacotes extras."""
+
+    name = "OLLAMA"
+
+    def __init__(self, model=None, host=None):
+        self.model = model or OLLAMA_DEFAULT_MODEL
+        host = host or os.environ.get("OLLAMA_HOST") or OLLAMA_DEFAULT_HOST
+        if not host.startswith("http"):
+            host = "http://" + host
+        self.host = host.rstrip("/")
+
+    def check(self):
+        """Retorna None se está tudo pronto, ou um aviso para o painel."""
+        try:
+            with urllib.request.urlopen(f"{self.host}/api/tags", timeout=2) as resp:
+                names = [m.get("name", "") for m in json.load(resp).get("models", [])]
+        except (OSError, ValueError):
+            return ("Não encontrei o Ollama. Abra o aplicativo Ollama e fale comigo de novo. "
+                    f"(procurei em {self.host})")
+        wanted = self.model if ":" in self.model else self.model + ":latest"
+        if wanted not in names:
+            return f"Modelo {self.model} não baixado. No terminal rode: ollama pull {self.model}"
+        return None
+
+    def chat(self, system, messages, image_b64=None):
+        msgs = [{"role": "system", "content": system}] + [dict(m) for m in messages]
+        if image_b64:
+            msgs[-1]["images"] = [image_b64]
+        payload = {"model": self.model, "messages": msgs, "stream": False,
+                   "options": {"num_predict": OLLAMA_MAX_TOKENS}}
+        req = urllib.request.Request(f"{self.host}/api/chat", data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+                data = json.load(resp)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = json.load(exc).get("error", "")
+            except (OSError, ValueError):
+                pass
+            if exc.code == 404:
+                raise BackendError(f"Modelo {self.model} não baixado. "
+                                   f"Rode: ollama pull {self.model}") from exc
+            if image_b64 and "image" in detail.lower():
+                raise BackendError(f"O modelo {self.model} não enxerga imagens. "
+                                   "Use um modelo com visão, como gemma3:4b.") from exc
+            raise BackendError(f"Erro do Ollama ({exc.code}): {detail or exc.reason}") from exc
+        except TimeoutError as exc:
+            raise BackendError("O Ollama demorou demais para responder. Tente de novo.") from exc
+        except OSError as exc:
+            raise BackendError("Sem link com o Ollama. Verifique se o aplicativo está aberto.") from exc
+        return data.get("message", {}).get("content", "").strip()
+
+
+class ClaudeBackend:
+    """API do Claude (paga, precisa de ANTHROPIC_API_KEY)."""
+
+    name = "CLAUDE"
+
+    def __init__(self, model=None):
+        self.model = model or CLAUDE_DEFAULT_MODEL
+        self.client = anthropic.Anthropic() if anthropic is not None and has_claude_key() else None
+
+    def check(self):
+        if anthropic is None:
+            return "Pacote anthropic não instalado. Rode: pip install anthropic"
+        if self.client is None:
+            return "Defina a variável ANTHROPIC_API_KEY e reinicie o visor."
+        return None
+
+    def chat(self, system, messages, image_b64=None):
+        if self.client is None:
+            raise BackendError(self.check())
+        messages = [dict(m) for m in messages]
+        if image_b64:
+            messages[-1]["content"] = [
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}},
+                {"type": "text", "text": messages[-1]["content"]},
+            ]
+        try:
+            response = self.client.beta.messages.create(
+                model=self.model,
+                max_tokens=CLAUDE_MAX_TOKENS,
+                system=system,
+                messages=messages,
+                output_config={"effort": "low"},  # respostas curtas e rápidas para um HUD
+                betas=[CLAUDE_FALLBACK_BETA],
+                fallbacks="default",
+            )
+        except anthropic.AuthenticationError as exc:
+            raise BackendError("Chave da API recusada. Confira ANTHROPIC_API_KEY.") from exc
+        except anthropic.NotFoundError as exc:
+            raise BackendError("Modelo não encontrado. Confira WOLF_MODEL.") from exc
+        except anthropic.RateLimitError as exc:
+            raise BackendError("Limite de requisições atingido. Tente de novo em instantes.") from exc
+        except anthropic.APIConnectionError as exc:
+            raise BackendError("Sem conexão com a rede. Verifique a internet.") from exc
+        except anthropic.APIStatusError as exc:
+            raise BackendError(f"Erro da API ({exc.status_code}). Tente de novo.") from exc
+        if response.stop_reason == "refusal":
+            return "Não posso ajudar com isso. Escolha outra missão, parceiro."
+        return " ".join(b.text for b in response.content if b.type == "text").strip()
+
+
+def has_claude_key():
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+def make_backend(name=None, model=None):
+    name = (name or os.environ.get("WOLF_BACKEND") or "").strip().lower()
+    if not name:
+        name = "claude" if has_claude_key() else "ollama"
+    model = model or os.environ.get("WOLF_MODEL") or None
+    if name == "claude":
+        return ClaudeBackend(model)
+    return OllamaBackend(model)
+
+
+# ---------------------------------------------------------------------------
+# Wolf
+# ---------------------------------------------------------------------------
 
 class Wolf:
-    def __init__(self, model=None, printer=print):
-        self.model = model or os.environ.get("WOLF_MODEL", DEFAULT_MODEL)
+    def __init__(self, backend=None, printer=print):
+        self.backend = backend or make_backend()
         self.log = deque(maxlen=LOG_SIZE)
         self.history = []
         self.busy = False
+        self.ready = False        # o cérebro respondeu ao último teste/pergunta
         self._print = printer
         self._lock = threading.Lock()
-        self.client = None
-        self.offline_reason = None
-
-        if anthropic is None:
-            self.offline_reason = "pacote anthropic não instalado (pip install anthropic)"
-        elif not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-            self.offline_reason = "ANTHROPIC_API_KEY não definida"
-        else:
-            self.client = anthropic.Anthropic()
-
-    @property
-    def online(self):
-        return self.client is not None
 
     @property
     def status(self):
-        if self.busy:
-            return "PROCESSANDO"
-        return "ONLINE" if self.online else "OFFLINE"
+        return "PROCESSANDO" if self.busy else self.backend.name
 
     def greet(self):
-        if self.online:
-            self._add("wolf", "Link estabelecido. Sensores do visor sincronizados. Estou com você.")
+        """Confere se o cérebro está pronto e se apresenta (ou explica o que falta)."""
+        problem = self.backend.check()
+        self.ready = problem is None
+        if problem:
+            self._add("wolf", problem)
         else:
-            self._add("wolf", OFFLINE_HELP)
-            self._print(f"[Wolf] offline: {self.offline_reason}")
+            self._add("wolf", "Link estabelecido. Sensores do visor sincronizados. Estou com você.")
+        self._print(f"[Wolf] cérebro: {self.backend.name.lower()} / {self.backend.model}")
 
     def snapshot(self):
         """Estado para o HUD desenhar (cópia, para não conflitar com a thread)."""
         with self._lock:
-            return {"log": list(self.log), "online": self.online,
+            return {"log": list(self.log), "online": self.ready,
                     "status": self.status, "busy": self.busy}
 
     def ask(self, question, sensors, image_jpeg=None):
@@ -101,14 +235,11 @@ class Wolf:
         question = question.strip() or "Analise a cena."
         with self._lock:
             was_busy = self.busy
-            self.busy = self.busy or self.online
+            self.busy = True
         if was_busy:
             self._add("wolf", "Ainda processando a mensagem anterior. Aguarde.")
             return False
         self._add("user", question + (" [imagem do visor]" if image_jpeg else ""))
-        if not self.online:
-            self._add("wolf", OFFLINE_HELP)
-            return True
         threading.Thread(target=self._run, args=(question, sensors, image_jpeg), daemon=True).start()
         return True
 
@@ -120,59 +251,24 @@ class Wolf:
         self._print(f"{'Wolf' if speaker == 'wolf' else 'Você'}: {text}")
 
     def _run(self, question, sensors, image_jpeg):
-        text_part = f"[SENSORES] {sensors}\n\n{question}"
-        content = []
-        if image_jpeg is not None:
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/jpeg",
-                           "data": base64.standard_b64encode(image_jpeg).decode("ascii")},
-            })
-        content.append({"type": "text", "text": text_part})
-
+        text = f"[SENSORES] {sensors}\n\n{question}"
+        image_b64 = base64.standard_b64encode(image_jpeg).decode("ascii") if image_jpeg else None
         try:
-            reply = self._request(self.history + [{"role": "user", "content": content}])
+            reply = self.backend.chat(SYSTEM_PROMPT, self.history + [{"role": "user", "content": text}],
+                                      image_b64)
+        except BackendError as exc:
+            self.ready = False
+            self._add("wolf", str(exc))
         except Exception as exc:  # noqa: BLE001 - qualquer falha vira mensagem no painel
-            reply = None
-            self._add("wolf", describe_error(exc))
-
-        if reply is not None:
+            self._add("wolf", f"Falha no link: {exc}")
+        else:
+            self.ready = True
+            reply = reply or "..."
             # O histórico guarda só texto: a imagem não é reenviada a cada pergunta.
-            note = " (imagem do visor enviada)" if image_jpeg is not None else ""
-            self.history += [{"role": "user", "content": text_part + note},
+            note = " (imagem do visor enviada)" if image_jpeg else ""
+            self.history += [{"role": "user", "content": text + note},
                              {"role": "assistant", "content": reply}]
             self.history = self.history[-HISTORY_TURNS * 2:]
             self._add("wolf", reply)
-
         with self._lock:
             self.busy = False
-
-    def _request(self, messages):
-        response = self.client.beta.messages.create(
-            model=self.model,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-            output_config={"effort": "low"},  # respostas curtas e rápidas para um HUD
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
-        )
-        if response.stop_reason == "refusal":
-            return "Não posso ajudar com isso. Escolha outra missão, parceiro."
-        text = " ".join(b.text for b in response.content if b.type == "text").strip()
-        return text or "..."
-
-
-def describe_error(exc):
-    if anthropic is not None:
-        if isinstance(exc, anthropic.AuthenticationError):
-            return "Chave da API recusada. Confira ANTHROPIC_API_KEY."
-        if isinstance(exc, anthropic.NotFoundError):
-            return "Modelo não encontrado. Confira WOLF_MODEL."
-        if isinstance(exc, anthropic.RateLimitError):
-            return "Limite de requisições atingido. Tente de novo em instantes."
-        if isinstance(exc, anthropic.APIConnectionError):
-            return "Sem conexão com a rede. Verifique a internet."
-        if isinstance(exc, anthropic.APIStatusError):
-            return f"Erro da API ({exc.status_code}). Tente de novo."
-    return f"Falha no link: {exc}"

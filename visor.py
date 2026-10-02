@@ -2,8 +2,11 @@
 
 Uso (PowerShell, na pasta do projeto):
     pip install -r requirements.txt
-    $env:ANTHROPIC_API_KEY = "sua-chave"    # opcional: sem chave o Wolf fica offline
+    ollama pull gemma3:4b                   # cérebro gratuito do Wolf (uma vez só)
     python visor.py
+
+O Wolf usa o Ollama (gratuito, roda no seu PC). Para usar o Claude (pago), defina
+$env:ANTHROPIC_API_KEY. Veja wolf.py para as outras opções.
 
 Opções:
     --camera N            índice da webcam (padrão 0)
