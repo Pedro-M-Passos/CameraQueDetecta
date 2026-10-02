@@ -51,6 +51,7 @@ $env:WOLF_BACKEND = "ollama"           # força o Ollama mesmo com a chave defin
 |-------|------|
 | `T` ou `ENTER` | abre o canal com o Wolf; digite e aperte `ENTER` para enviar |
 | `V` | envia a imagem atual da câmera para o Wolf analisar |
+| `M` | liga/desliga a voz do Wolf |
 | `1` / `2` / `3` | liga/desliga os detectores de rosto, mãos e objetos |
 | `L` | liga/desliga o efeito da lente |
 | `H` | mostra/esconde a ajuda |
@@ -75,9 +76,23 @@ Se ainda estiver lento:
 A janela do OpenCV não aceita acentos; para escrever com acentos, digite a mensagem
 no próprio terminal do PowerShell e aperte `ENTER`.
 
-Cada mensagem vai para o Wolf junto com uma linha do que os sensores veem agora
-(rosto, mãos, objetos e gesto), então dá para perguntar coisas como "o que tem na
-minha mão?" ou "quantas pessoas você vê?".
+Quando a pergunta é sobre a cena ("o que você vê?", "o que tem na minha mão?",
+"quantas pessoas tem aqui?") ou quando você aperta `V`, o Wolf recebe junto o que os
+sensores detectam. Nas outras mensagens ele só conversa, sem relatar os sensores.
+
+### Voz do Wolf
+
+O Wolf fala as respostas em voz alta com um efeito robótico (mais grave, metálico, com
+filtro de rádio). Não precisa instalar nada: no Windows ele usa a voz do próprio sistema.
+Se a voz sair com sotaque em inglês, instale a voz em português em
+*Configurações > Hora e idioma > Fala > Adicionar vozes > Português (Brasil)*.
+
+```powershell
+python visor.py --no-voice           # começa sem voz (a tecla M liga/desliga)
+$env:WOLF_VOICE_NAME = "Daniel"      # escolhe outra voz instalada pelo nome
+```
+
+Os ajustes do efeito (grave, metálico, eco, filtro) ficam no topo de `voice.py`.
 
 Opções úteis:
 
@@ -92,6 +107,7 @@ Arquivos:
 - `visor.py`: laço principal, sensores (rosto e mãos do MemeCV + detector de objetos) e teclado.
 - `visor_hud.py`: desenho do HUD (lente, moldura, miras, leituras, painel do Wolf).
 - `wolf.py`: personalidade do Wolf e conversa pelo Ollama (padrão) ou pela API do Claude.
+- `voice.py`: voz robótica do Wolf (síntese do sistema + efeitos em numpy).
 
 ## MemeCV
 

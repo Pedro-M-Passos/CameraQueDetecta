@@ -17,6 +17,8 @@ Variáveis de ambiente:
 import base64
 import json
 import os
+import re
+import unicodedata
 import threading
 import urllib.error
 import urllib.request
@@ -59,9 +61,12 @@ Personalidade:
 
 Como responder:
 - Português do Brasil, no máximo três frases curtas: o texto aparece num painel pequeno do HUD.
-- Cada mensagem do parceiro vem com uma linha [SENSORES] descrevendo o que o visor detecta \
-agora (rostos, mãos, objetos, gesto). Use essas leituras quando forem relevantes e nunca \
-invente detecções que não estão lá. Se vier uma imagem, descreva o que importa nela.
+- Quando o parceiro pergunta sobre a cena, a mensagem vem com uma linha [SENSORES] \
+descrevendo o que o visor detecta agora (rostos, mãos, objetos, gesto). Use essas leituras \
+para responder e nunca invente detecções que não estão lá. Se vier uma imagem, descreva o \
+que importa nela.
+- Não comece respostas relatando os sensores e não repita leituras em toda mensagem. Fora \
+das perguntas sobre a cena, apenas converse.
 - Este visor é um protótipo de interface feito por um entusiasta. Se pedirem algo perigoso de \
 verdade, recuse no seu estilo e ofereça uma alternativa segura.
 """
@@ -200,9 +205,23 @@ def make_backend(name=None, model=None):
 # Wolf
 # ---------------------------------------------------------------------------
 
+# Palavras que indicam uma pergunta sobre o que a câmera está vendo (sem acentos, minúsculas).
+SCENE_WORDS = re.compile(
+    r"\b(ve|ves|ver|vendo|veja|enxerg\w*|olh\w*|camera|cena|visor|sensor\w*|detect\w*|"
+    r"rosto\w*|cara|mao|maos|dedo\w*|gesto\w*|objeto\w*|segurando|seguro|aqui|isso|isto|"
+    r"quem|quant\w*|onde|frente|aparec\w*|mostr\w*|pessoa\w*|scan\w*|analis\w*|identific\w*)\b")
+
+
+def asks_about_scene(question):
+    """True se a pergunta parece ser sobre o que o visor está vendo."""
+    plain = unicodedata.normalize("NFKD", question.lower()).encode("ascii", "ignore").decode()
+    return bool(SCENE_WORDS.search(plain))
+
+
 class Wolf:
-    def __init__(self, backend=None, printer=print):
+    def __init__(self, backend=None, printer=print, on_speak=None):
         self.backend = backend or make_backend()
+        self.on_speak = on_speak      # chamado com o texto de cada resposta (voz)
         self.log = deque(maxlen=LOG_SIZE)
         self.history = []
         self.busy = False
@@ -221,7 +240,7 @@ class Wolf:
         if problem:
             self._add("wolf", problem)
         else:
-            self._add("wolf", "Link estabelecido. Sensores do visor sincronizados. Estou com você.")
+            self._add("wolf", "Link estabelecido. Estou com você, parceiro.", speak=True)
         self._print(f"[Wolf] cérebro: {self.backend.name.lower()} / {self.backend.model}")
 
     def snapshot(self):
@@ -230,8 +249,12 @@ class Wolf:
             return {"log": list(self.log), "online": self.ready,
                     "status": self.status, "busy": self.busy}
 
-    def ask(self, question, sensors, image_jpeg=None):
-        """Envia uma pergunta em segundo plano. Retorna False se o Wolf ainda está respondendo."""
+    def ask(self, question, sensors=None, image_jpeg=None):
+        """Envia uma pergunta em segundo plano. Retorna False se o Wolf ainda está respondendo.
+
+        sensors: texto com o que o visor detecta. Só é enviado junto quando há imagem ou quando
+        a pergunta é sobre a cena, para o Wolf não ficar relatando os sensores em toda resposta.
+        """
         question = question.strip() or "Analise a cena."
         with self._lock:
             was_busy = self.busy
@@ -245,13 +268,16 @@ class Wolf:
 
     # ------------------------------------------------------------------
 
-    def _add(self, speaker, text):
+    def _add(self, speaker, text, speak=False):
         with self._lock:
             self.log.append((speaker, text))
         self._print(f"{'Wolf' if speaker == 'wolf' else 'Você'}: {text}")
+        if speak and self.on_speak:
+            self.on_speak(text)
 
     def _run(self, question, sensors, image_jpeg):
-        text = f"[SENSORES] {sensors}\n\n{question}"
+        with_sensors = bool(sensors) and (image_jpeg is not None or asks_about_scene(question))
+        text = f"[SENSORES] {sensors}\n\n{question}" if with_sensors else question
         image_b64 = base64.standard_b64encode(image_jpeg).decode("ascii") if image_jpeg else None
         try:
             reply = self.backend.chat(SYSTEM_PROMPT, self.history + [{"role": "user", "content": text}],
@@ -264,11 +290,13 @@ class Wolf:
         else:
             self.ready = True
             reply = reply or "..."
-            # O histórico guarda só texto: a imagem não é reenviada a cada pergunta.
+            # O histórico guarda só a pergunta: leituras e imagem antigas não são reenviadas,
+            # assim o modelo não se apega a elas nas respostas seguintes.
             note = " (imagem do visor enviada)" if image_jpeg else ""
-            self.history += [{"role": "user", "content": text + note},
+            note += " (leitura dos sensores enviada)" if with_sensors else ""
+            self.history += [{"role": "user", "content": question + note},
                              {"role": "assistant", "content": reply}]
             self.history = self.history[-HISTORY_TURNS * 2:]
-            self._add("wolf", reply)
+            self._add("wolf", reply, speak=True)
         with self._lock:
             self.busy = False

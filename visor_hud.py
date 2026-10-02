@@ -234,6 +234,13 @@ def draw_wolf_panel(img, wolf_state, t):
     blink = int(t * 2) % 2 == 0
     put(img, "WOLF // LINK DE SUPORTE", (x1 + 12, y1 + 22), 0.5, RED, 2)
     status = wolf_state["status"]
+    if wolf_state.get("speaking"):
+        status = "FALANDO"
+        # barrinhas de áudio animadas ao lado do título
+        for i in range(6):
+            level = 0.3 + 0.7 * abs(math.sin(t * 9 + i * 1.7))
+            bx = x1 + 250 + i * 7
+            cv2.line(img, (bx, y1 + 22), (bx, y1 + 22 - int(14 * level)), RED, 3, LINE)
     dot_color = (RED if blink else RED_DIM) if wolf_state["busy"] else (WHITE if online else GREY)
     cv2.circle(img, (x2 - 16, y1 + 16), 5, dot_color, -1, LINE)
     put(img, status, (x2 - 26 - text_width(status, 0.4), y1 + 20), 0.4, GREY)
@@ -265,7 +272,8 @@ def draw_wolf_panel(img, wolf_state, t):
             typed = typed[:2] + typed[3:]
         put(img, typed, (x1 + 12, y2 - 10), scale, WHITE)
     else:
-        put(img, "[T] falar  [V] analisar cena  [H] ajuda", (x1 + 12, y2 - 10), 0.4, GREY)
+        voice = "ON" if wolf_state.get("voice", True) else "OFF"
+        put(img, f"[T] falar  [V] cena  [M] voz {voice}  [H] ajuda", (x1 + 12, y2 - 10), 0.4, GREY)
 
 
 def draw_help(img):
@@ -273,6 +281,7 @@ def draw_help(img):
     keys = [
         ("T / ENTER", "abrir o canal com o Wolf (digite e ENTER envia)"),
         ("V", "enviar a imagem atual para o Wolf analisar"),
+        ("M", "ligar/desligar a voz do Wolf"),
         ("1 / 2 / 3", "ligar/desligar rosto, maos e objetos (mais FPS)"),
         ("L", "ligar/desligar o efeito da lente (mais FPS)"),
         ("H", "mostrar/esconder esta ajuda"),

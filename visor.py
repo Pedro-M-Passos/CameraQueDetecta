@@ -17,9 +17,10 @@ Opções:
     --object-every N      detector de objetos a cada N quadros (padrão 3; maior = mais FPS)
     --cam-width/--cam-height  resolução pedida à webcam (padrão 640x480)
     --no-objects, --no-lens   começa com objetos ou efeito da lente desligados
+    --no-voice            começa com a voz do Wolf desligada
 
 Teclas: T ou ENTER fala com o Wolf, V manda a imagem atual para ele analisar,
-1/2/3 ligam e desligam rosto, mãos e objetos, L liga e desliga o efeito da lente,
+M liga e desliga a voz do Wolf, 1/2/3 ligam e desligam rosto, mãos e objetos, L liga e desliga o efeito da lente,
 H mostra a ajuda, ESC sai. Também dá para digitar para o Wolf no próprio terminal.
 
 Reaproveita do MemeCV (main.py) os modelos de rosto e mãos e a classificação de gestos.
@@ -38,6 +39,7 @@ from mediapipe.tasks.python import vision
 
 import main as memecv
 import visor_hud as hud
+from voice import Voice
 from wolf import Wolf
 
 OBJECT_MODEL = "efficientdet_lite0.tflite"
@@ -362,6 +364,7 @@ def parse_args():
                         help="roda o detector de objetos a cada N quadros (maior = mais rápido)")
     parser.add_argument("--no-objects", action="store_true", help="começa com objetos desligados")
     parser.add_argument("--no-lens", action="store_true", help="começa sem o efeito da lente")
+    parser.add_argument("--no-voice", action="store_true", help="começa com a voz do Wolf desligada")
     return parser.parse_args()
 
 
@@ -378,7 +381,7 @@ def run_snapshot(args, still, wolf):
         sensors.close()
     info = {"fps": 0.0, "det_rate": 0.0, "uptime": "00:00", "hint": "H: ajuda",
             "sensors": sensors.enabled}
-    wolf_state = dict(wolf.snapshot(), typing=False, input="")
+    wolf_state = dict(wolf.snapshot(), typing=False, input="", speaking=False, voice=True)
     view = render(frame, targets, hand_list, readings, wolf_state, info, False, time.monotonic(),
                   lens=not args.no_lens)
     cv2.imwrite(args.snapshot, view)
@@ -393,16 +396,21 @@ def main():
         if still is None:
             sys.exit(f"[ERRO] Não foi possível abrir a imagem {args.image}")
 
-    wolf = Wolf()
-    wolf.greet()
     if args.snapshot and still is not None:
+        wolf = Wolf()
+        wolf.greet()
         run_snapshot(args, still, wolf)
         return
+
+    voice = Voice(enabled=False if args.no_voice else None)
+    wolf = Wolf(on_speak=voice.speak)
+    wolf.greet()
 
     camera = None if still is not None else CameraStream(args.camera, args.cam_width, args.cam_height)
     terminal_lines = queue.Queue()
     start_terminal_input(terminal_lines)
-    print("Visor ativo. T/ENTER fala com o Wolf, V analisa a cena, 1/2/3/L ajustam o FPS, "
+    print("Visor ativo. T/ENTER fala com o Wolf, V analisa a cena, M liga/desliga a voz, "
+          "1/2/3/L ajustam o FPS, "
           "H ajuda, ESC sai.")
 
     sensors = Sensors(args.object_every)
@@ -442,7 +450,8 @@ def main():
             while not terminal_lines.empty():
                 wolf.ask(terminal_lines.get(), sensors_summary(readings))
 
-            wolf_state = dict(wolf.snapshot(), typing=typing, input=typed)
+            wolf_state = dict(wolf.snapshot(), typing=typing, input=typed,
+                              speaking=voice.speaking, voice=voice.enabled)
             view = render(frame, targets, hand_list, readings, wolf_state, info, show_help, now,
                           lens=lens)
             cv2.imshow(WINDOW, view)
@@ -470,6 +479,8 @@ def main():
                          sensors_summary(readings), encode_scan(frame))
             elif key in (ord("h"), ord("H")):
                 show_help = not show_help
+            elif key in (ord("m"), ord("M")):
+                print(f"[Wolf] voz {'ligada' if voice.toggle() else 'desligada'}")
             elif key in (ord("l"), ord("L")):
                 lens = not lens
             elif chr(key) in DETECTOR_KEYS:
