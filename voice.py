@@ -1,7 +1,9 @@
-"""Voz do Wolf: fala as respostas com um efeito robótico, sem internet e sem instalar nada.
+"""Voz do Wolf: fala as respostas com um efeito robótico, tudo offline.
 
 Como funciona:
-  1. Um sintetizador de voz que já vem no sistema gera um .wav com o texto:
+  1. Um sintetizador de voz gera um .wav com o texto:
+     - Piper (opcional, recomendado): voz neural gratuita e offline, bem mais natural.
+       Instale uma vez com: python voice.py --instalar   (baixa ~90 MB; retoma se a rede cair)
      - Windows: as vozes do próprio Windows, chamadas pelo PowerShell. Aparecem as vozes
        "modernas" (as de Configurações > Fala, como Maria e Daniel) e as clássicas (SAPI).
      - Linux: espeak-ng (se estiver instalado).
@@ -16,6 +18,8 @@ Autoteste e lista de vozes (no terminal):
     python voice.py --vozes            lista as vozes instaladas
     python voice.py "teste de voz"     testa a voz atual
     python voice.py --ouvir            cada voz fala o próprio nome, para você escolher
+    python voice.py --instalar         instala o Piper com a voz pt-BR "faber"
+    python voice.py --instalar en      ... e também a voz inglesa "ryan"
 
 Variáveis de ambiente (opcionais; a escolha salva pelo visor vale quando elas não existem):
     WOLF_VOICE=0            começa com a voz desligada
@@ -40,7 +44,8 @@ import wave
 
 import numpy as np
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".wolf_voz.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_FILE = os.path.join(HERE, ".wolf_voz.json")
 DEFAULT_SPEED = 1.1
 
 # Efeitos (ajuste a gosto). pitch < 1 deixa a voz mais grave, sem mudar a velocidade.
@@ -48,13 +53,13 @@ DEFAULT_SPEED = 1.1
 # comb_ms/comb_gain (ressonância metálica fixa), presence (realce de 2-4 kHz e 4-8,5 kHz),
 # breath_mix (chiado sintético que acompanha a fala) e reverb_mix/reverb_ms (reverberação metálica).
 EFFECTS = {
-    # Inspirado no estilo do Blade Wolf: voz masculina grave, calma e medida, com uma camada
-    # sintética sutil. Fica melhor com uma voz masculina de base (ex.: Daniel ou David).
-    "blade_wolf": {"pitch": 0.82, "ring_hz": 70, "ring_mix": 0.1, "echo_ms": 0, "echo_gain": 0,
-                   "band": (80, 9000), "bits": 0,
-                   "chorus_ms": 9, "chorus_depth_ms": 2.0, "chorus_hz": 0.35, "chorus_mix": 0.25,
-                   "comb_ms": 10.9, "comb_gain": 0.45, "presence": (1.4, 3.0), "breath_mix": 0.2,
-                   "reverb_mix": 0.3, "reverb_ms": 260},
+    # Inspirado no estilo do Blade Wolf: voz masculina grave, calma e natural, com só um leve
+    # brilho metálico por cima. Fica melhor com uma voz neural de base (Piper, voz "faber").
+    "blade_wolf": {"pitch": 0.92, "ring_hz": 70, "ring_mix": 0.03, "echo_ms": 0, "echo_gain": 0,
+                   "band": (60, 10000), "bits": 0,
+                   "chorus_ms": 9, "chorus_depth_ms": 1.0, "chorus_hz": 0.3, "chorus_mix": 0.08,
+                   "comb_ms": 10.9, "comb_gain": 0.15, "presence": (1.1, 1.3), "breath_mix": 0.03,
+                   "reverb_mix": 0.12, "reverb_ms": 120},
     "robo": {"pitch": 0.85, "ring_hz": 55, "ring_mix": 0.3, "echo_ms": 14, "echo_gain": 0.3,
              "band": (250, 3800), "bits": 10},
     "leve": {"pitch": 0.93, "ring_hz": 40, "ring_mix": 0.1, "echo_ms": 10, "echo_gain": 0.18,
@@ -145,12 +150,136 @@ def clean_for_speech(text):
 
 
 # ---------------------------------------------------------------------------
+# Piper (voz neural offline, opcional)
+# ---------------------------------------------------------------------------
+
+PIPER_DIR = os.path.join(HERE, "piper")            # fica fora do git (.gitignore)
+PIPER_VOICES_DIR = os.path.join(PIPER_DIR, "vozes")
+PIPER_RELEASE = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/"
+PIPER_ARCHIVES = {"win32": "piper_windows_amd64.zip", "linux": "piper_linux_x86_64.tar.gz",
+                  "darwin": "piper_macos_x64.tar.gz"}
+PIPER_VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+PIPER_MODELS = {   # idioma: (arquivo, pasta no repositório de vozes)
+    "pt": ("pt_BR-faber-medium", "pt/pt_BR/faber/medium/"),
+    "en": ("en_US-ryan-medium", "en/en_US/ryan/medium/"),
+}
+
+
+def piper_exe():
+    name = "piper.exe" if sys.platform == "win32" else "piper"
+    path = os.path.join(PIPER_DIR, "piper", name)
+    return path if os.path.isfile(path) else None
+
+
+def piper_voices():
+    """Vozes do Piper baixadas em piper/vozes (um .onnx + .onnx.json cada)."""
+    if not piper_exe() or not os.path.isdir(PIPER_VOICES_DIR):
+        return []
+    voices = []
+    for fname in sorted(os.listdir(PIPER_VOICES_DIR)):
+        model = os.path.join(PIPER_VOICES_DIR, fname)
+        if not fname.endswith(".onnx") or not os.path.isfile(model + ".json"):
+            continue
+        try:
+            with open(model + ".json", encoding="utf-8") as f:
+                info = json.load(f)
+        except (OSError, ValueError):
+            continue
+        lang = (info.get("language", {}).get("code") or info.get("espeak", {}).get("voice", "")).replace("_", "-")
+        parts = fname[:-5].replace("_", "-").split("-")
+        speaker = parts[2] if len(parts) > 2 else fname[:-5]
+        voices.append({"engine": "piper", "name": f"Piper {speaker}", "lang": lang, "model": model})
+    return voices
+
+
+def download(url, dest, tries=10):
+    """Baixa url em dest. Se a conexão cair, continua de onde parou (até `tries` tentativas)."""
+    import urllib.error
+    import urllib.request
+
+    part = dest + ".part"
+    for attempt in range(1, tries + 1):
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        request = urllib.request.Request(url, headers={"User-Agent": "wolf-voice"})
+        if have:
+            request.add_header("Range", f"bytes={have}-")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as resp:
+                if have and resp.status != 206:      # servidor ignorou o Range: recomeça
+                    have = 0
+                total = have + int(resp.headers.get("Content-Length") or 0)
+                with open(part, "ab" if have else "wb") as f:
+                    last = 0.0
+                    while True:
+                        chunk = resp.read(1 << 16)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        have += len(chunk)
+                        if total and time.monotonic() - last > 0.5:
+                            last = time.monotonic()
+                            print(f"\r  {os.path.basename(dest)}: {have / 1e6:5.1f} / {total / 1e6:.1f} MB",
+                                  end="", flush=True)
+            if total and have < total:
+                raise OSError("conexão encerrada antes do fim")
+            print(f"\r  {os.path.basename(dest)}: {have / 1e6:5.1f} MB ok" + " " * 20)
+            os.replace(part, dest)
+            return dest
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and have:             # já estava completo
+                os.replace(part, dest)
+                return dest
+            if exc.code in (403, 404):
+                raise RuntimeError(f"não consegui baixar {url} (HTTP {exc.code})") from exc
+            error = exc
+        except OSError as exc:
+            error = exc
+        wait = min(2 ** attempt, 30)
+        print(f"\n  falha ({error}); tentando de novo em {wait} s ({attempt}/{tries})...")
+        time.sleep(wait)
+    raise RuntimeError(f"não consegui baixar {url} depois de {tries} tentativas")
+
+
+def install_piper(langs=("pt",)):
+    """Baixa o Piper e as vozes pedidas para piper/. Retorna a lista de vozes instaladas."""
+    import tarfile
+    import zipfile
+
+    os.makedirs(PIPER_VOICES_DIR, exist_ok=True)
+    if not piper_exe():
+        archive = PIPER_ARCHIVES.get(sys.platform)
+        if not archive:
+            raise RuntimeError(f"o Piper não tem versão pronta para {sys.platform}")
+        print("Baixando o programa Piper...")
+        path = download(PIPER_RELEASE + archive, os.path.join(PIPER_DIR, archive))
+        if archive.endswith(".zip"):
+            with zipfile.ZipFile(path) as z:
+                z.extractall(PIPER_DIR)
+        else:
+            with tarfile.open(path) as t:
+                t.extractall(PIPER_DIR)
+        os.remove(path)
+        if not piper_exe():
+            raise RuntimeError("o arquivo do Piper não tinha o executável esperado")
+        if sys.platform != "win32":
+            os.chmod(piper_exe(), 0o755)
+    for lang in langs:
+        name, folder = PIPER_MODELS[lang]
+        for ext in (".onnx.json", ".onnx"):
+            dest = os.path.join(PIPER_VOICES_DIR, name + ext)
+            if not os.path.isfile(dest):
+                print(f"Baixando a voz {name}{ext}...")
+                download(PIPER_VOICE_URL + folder + name + ext, dest)
+    return piper_voices()
+
+
+# ---------------------------------------------------------------------------
 # Vozes
 # ---------------------------------------------------------------------------
 
 def list_voices():
     """Lista as vozes instaladas: [{"engine", "name", "lang"}], as em português primeiro."""
-    voices = []
+    voices = piper_voices()
     if sys.platform == "win32":
         if not shutil.which("powershell"):
             raise RuntimeError("PowerShell não encontrado no PATH")
@@ -163,8 +292,9 @@ def list_voices():
         engine = shutil.which("espeak-ng") or shutil.which("espeak")
         if engine:
             voices.append({"engine": "espeak", "name": "pt-br", "lang": "pt-BR"})
-    # Português primeiro; entre elas, as modernas antes das clássicas.
-    voices.sort(key=lambda v: (not v["lang"].lower().startswith("pt"), v["engine"] != "moderna"))
+    # Português primeiro; em cada idioma, Piper (neural), depois modernas, depois clássicas.
+    order = {"piper": 0, "moderna": 1}
+    voices.sort(key=lambda v: (not v["lang"].lower().startswith("pt"), order.get(v["engine"], 2)))
     return voices
 
 
@@ -185,6 +315,17 @@ def synthesize(text, path, voice, speed=DEFAULT_SPEED):
     """Gera um .wav com o texto na voz escolhida (um item de list_voices())."""
     if voice is None:
         raise RuntimeError("nenhuma voz instalada")
+    if voice["engine"] == "piper":
+        # length_scale < 1 fala mais rápido. O texto vai pela entrada padrão, em UTF-8.
+        result = subprocess.run(
+            [piper_exe() or "piper", "--model", voice["model"], "--output_file", path,
+             "--length_scale", f"{1 / max(speed, 0.3):.3f}"],
+            input=text.encode("utf-8"), capture_output=True, timeout=120,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) < 100:
+            detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
+            raise RuntimeError("o Piper falhou: " + (detail[-1] if detail else "sem detalhes"))
+        return
     if voice["engine"] == "espeak":
         engine = shutil.which("espeak-ng") or shutil.which("espeak")
         if not engine:
@@ -544,6 +685,21 @@ def self_test(args):
     import traceback
 
     print(f"Sistema: {sys.platform} | Python {sys.version.split()[0]}")
+    if args and args[0] == "--instalar":
+        extra = [a.lower() for a in args[1:]]
+        langs = ("pt", "en") if ("en" in extra or "tudo" in extra) else ("pt",)
+        try:
+            voices = install_piper(langs)
+        except Exception as exc:  # noqa: BLE001
+            print(f"\nA instalação parou: {exc}")
+            print("Rode o mesmo comando de novo: o download continua de onde parou.")
+            sys.exit(1)
+        saved = load_settings()
+        saved.update({"voz": "Piper faber", "efeito": saved.get("efeito", DEFAULT_EFFECT)})
+        save_settings(saved)
+        print("\nPiper instalado. Vozes:", ", ".join(f"{v['name']} ({v['lang']})" for v in voices))
+        print('Voz do Wolf agora é "Piper faber". Testando...\n')
+        args = []
     name, effect, speed = current_settings()
     step = "listar vozes"
     try:
@@ -551,7 +707,9 @@ def self_test(args):
         voice = find_voice(voices, name) or (voices[0] if voices else None)
         print_voices(voices, voice)
         if args and args[0] == "--vozes":
-            print('\nPara escolher: aperte N no visor, ou $env:WOLF_VOICE_NAME = "Daniel"')
+            print('\nPara escolher: aperte N no visor, ou $env:WOLF_VOICE_NAME = "faber"')
+            if not piper_exe():
+                print("Dica: para uma voz bem mais natural, rode: python voice.py --instalar")
             return
         tmp = tempfile.mkdtemp(prefix="wolf_teste_")
         if args and args[0] == "--ouvir":
