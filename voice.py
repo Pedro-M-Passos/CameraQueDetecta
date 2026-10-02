@@ -17,6 +17,7 @@ Variáveis de ambiente:
 """
 
 import atexit
+import base64
 import os
 import queue
 import re
@@ -51,11 +52,35 @@ if ($env:WOLF_VOICE_NAME) { $pick = $voices | Where-Object { $_.Name -like "*$($
 if (-not $pick) { $pick = $voices | Where-Object { $_.Culture.Name -like 'pt*' } | Select-Object -First 1 }
 if ($pick) { $s.SelectVoice($pick.Name) }
 $s.Rate = [int]$env:WOLF_TTS_RATE
-$s.SetOutputToWaveFile($env:WOLF_TTS_OUT)
+$fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(22050, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
+$s.SetOutputToWaveFile($env:WOLF_TTS_OUT, $fmt)
 $s.Speak($env:WOLF_TTS_TEXT)
 $s.Dispose()
 if ($pick) { Write-Output $pick.Name } else { Write-Output "padrao" }
 """
+
+# Lista as vozes instaladas (usado pelo autoteste: python voice.py)
+_PS_LIST_VOICES = r"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$s.GetInstalledVoices() | ForEach-Object { "$($_.VoiceInfo.Name) | $($_.VoiceInfo.Culture.Name) | ativa=$($_.Enabled)" }
+$s.Dispose()
+"""
+
+
+def run_powershell(script, env=None, timeout=60):
+    """Roda um script no PowerShell do Windows.
+
+    O script vai em -EncodedCommand (base64 UTF-16) para aspas e quebras de linha não serem
+    estragadas pela linha de comando do Windows.
+    """
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-EncodedCommand", encoded],
+        env=env, capture_output=True, text=True, timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
 
 
 def clean_for_speech(text):
@@ -71,15 +96,14 @@ def clean_for_speech(text):
 def synthesize(text, path):
     """Gera um .wav com o texto. Retorna o nome da voz usada, ou levanta RuntimeError."""
     if sys.platform == "win32":
+        if not shutil.which("powershell"):
+            raise RuntimeError("PowerShell não encontrado no PATH")
         env = dict(os.environ, WOLF_TTS_TEXT=text, WOLF_TTS_OUT=path, WOLF_TTS_RATE=str(RATE_WINDOWS))
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_SCRIPT],
-            env=env, capture_output=True, text=True, timeout=60,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode != 0 or not os.path.exists(path):
-            raise RuntimeError(result.stderr.strip() or "a voz do Windows não respondeu")
-        return result.stdout.strip() or "padrao"
+        result = run_powershell(_PS_SCRIPT, env)
+        if result.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) < 100:
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            raise RuntimeError("a voz do Windows falhou: " + (detail[0] if detail else "sem detalhes"))
+        return result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "padrao"
     engine = shutil.which("espeak-ng") or shutil.which("espeak")
     if not engine:
         raise RuntimeError("nenhum sintetizador encontrado (instale o espeak-ng)")
@@ -166,12 +190,13 @@ def play(path):
 class Voice:
     """Fila de falas do Wolf. speak() volta na hora; a síntese e o som rodam numa thread."""
 
-    def __init__(self, enabled=None, printer=print):
+    def __init__(self, enabled=None, printer=print, on_error=None):
         if enabled is None:
             enabled = os.environ.get("WOLF_VOICE", "1") != "0"
         self.enabled = enabled
         self.speaking_until = 0.0     # instante (time.monotonic) em que a fala atual termina
         self._print = printer
+        self.on_error = on_error      # chamado uma vez com a mensagem se a voz falhar
         self._queue = queue.Queue()
         self._dir = tempfile.mkdtemp(prefix="wolf_voz_")
         atexit.register(shutil.rmtree, self._dir, True)
@@ -234,3 +259,55 @@ class Voice:
                 if not self._warned:
                     self._warned = True
                     self._print(f"[Wolf] voz indisponível: {exc}")
+                    self._print("[Wolf] Para diagnosticar, rode no terminal: python voice.py")
+                    if self.on_error:
+                        self.on_error(f"Sem voz: {exc}. Rode python voice.py para diagnosticar.")
+
+
+# ---------------------------------------------------------------------------
+# Autoteste: python voice.py ["texto"]
+# ---------------------------------------------------------------------------
+
+def self_test(text):
+    """Testa cada etapa da voz e mostra onde parou."""
+    import traceback
+
+    print(f"Sistema: {sys.platform} | Python {sys.version.split()[0]}")
+    step = "listar vozes"
+    try:
+        if sys.platform == "win32":
+            print("PowerShell:", shutil.which("powershell") or "NÃO ENCONTRADO")
+            result = run_powershell(_PS_LIST_VOICES)
+            print("Vozes instaladas (nome | idioma | ativa):")
+            print("  " + ("\n  ".join(result.stdout.strip().splitlines()) or "(nenhuma)"))
+            if result.returncode != 0:
+                print("  erro:", result.stderr.strip())
+        else:
+            print("Sintetizador:", shutil.which("espeak-ng") or shutil.which("espeak") or "NÃO ENCONTRADO")
+
+        tmp = tempfile.mkdtemp(prefix="wolf_teste_")
+        raw, out = os.path.join(tmp, "bruto.wav"), os.path.join(tmp, "wolf.wav")
+        step = "gerar a fala"
+        print("Voz usada:", synthesize(text, raw))
+        step = "ler o áudio"
+        audio, rate = read_wav(raw)
+        print(f"Áudio gerado: {len(audio) / rate:.1f} s a {rate} Hz")
+        step = "aplicar os efeitos"
+        write_wav(out, robotize(audio, rate), rate)
+        step = "tocar o som"
+        print("Tocando a voz normal e depois a do Wolf...")
+        if sys.platform == "win32":
+            import winsound
+            winsound.PlaySound(raw, winsound.SND_FILENAME)
+            winsound.PlaySound(out, winsound.SND_FILENAME)
+        elif not play(out):
+            print("  (nenhum player de áudio encontrado)")
+        print(f"OK. Arquivos em {tmp}")
+    except Exception:  # noqa: BLE001
+        print(f"\nFALHOU na etapa: {step}")
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    self_test(" ".join(sys.argv[1:]) or "Teste de voz. Aqui é o Wolf, pronto para a missão.")

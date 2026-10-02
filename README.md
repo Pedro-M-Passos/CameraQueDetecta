@@ -94,6 +94,13 @@ $env:WOLF_VOICE_NAME = "Daniel"      # escolhe outra voz instalada pelo nome
 
 Os ajustes do efeito (grave, metálico, eco, filtro) ficam no topo de `voice.py`.
 
+Se o Wolf não falar, rode o autoteste. Ele lista as vozes instaladas, gera uma fala,
+toca a voz normal e depois a do Wolf, e mostra em qual etapa parou se algo falhar:
+
+```powershell
+python voice.py "teste de voz"
+```
+
 Opções úteis:
 
 ```powershell

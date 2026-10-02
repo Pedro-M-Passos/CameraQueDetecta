@@ -404,6 +404,7 @@ def main():
 
     voice = Voice(enabled=False if args.no_voice else None)
     wolf = Wolf(on_speak=voice.speak)
+    voice.on_error = wolf.notify
     wolf.greet()
 
     camera = None if still is not None else CameraStream(args.camera, args.cam_width, args.cam_height)

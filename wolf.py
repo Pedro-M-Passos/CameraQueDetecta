@@ -243,6 +243,10 @@ class Wolf:
             self._add("wolf", "Link estabelecido. Estou com você, parceiro.", speak=True)
         self._print(f"[Wolf] cérebro: {self.backend.name.lower()} / {self.backend.model}")
 
+    def notify(self, text):
+        """Mostra um aviso do sistema no painel do Wolf (sem falar)."""
+        self._add("wolf", text)
+
     def snapshot(self):
         """Estado para o HUD desenhar (cópia, para não conflitar com a thread)."""
         with self._lock:
