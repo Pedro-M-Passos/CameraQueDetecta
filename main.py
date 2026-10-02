@@ -35,6 +35,9 @@ MODEL_URLS = {
                             "face_landmarker/float16/1/face_landmarker.task",
     "hand_landmarker.task": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
                             "hand_landmarker/float16/1/hand_landmarker.task",
+    # usado pelo visor.py (detecção de objetos)
+    "efficientdet_lite0.tflite": "https://storage.googleapis.com/mediapipe-models/object_detector/"
+                                 "efficientdet_lite0/int8/1/efficientdet_lite0.tflite",
 }
 
 # Estados possíveis (gesto/expressão estabilizado) -> arquivo do meme

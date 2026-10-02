@@ -1,0 +1,65 @@
+# CameraQueDetecta
+
+Dois programas que usam a webcam, OpenCV e MediaPipe:
+
+| Programa | O que faz |
+|----------|-----------|
+| `main.py` (MemeCV) | Reconhece expressões e gestos (sorriso, joinha, paz, pensando, timeout) e mostra o meme correspondente. |
+| `visor.py` (Visor + Wolf) | Protótipo da interface de um visor de ciborgue: HUD vermelho/branco com miras em rostos, mãos e objetos, e o **Wolf**, uma IA de suporte que conversa com você pelo canto da lente. |
+
+![Visor com dois alvos detectados](docs/visor_objetos.jpg)
+
+## Instalação (Windows / PowerShell)
+
+```powershell
+pip install -r requirements.txt
+```
+
+Na primeira execução os modelos do MediaPipe são baixados para `models/`
+(rosto ~3,7 MB, mãos ~7,8 MB, objetos ~4,6 MB).
+
+## Visor + Wolf
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sua-chave"   # https://console.anthropic.com
+python visor.py
+```
+
+Sem a chave o visor funciona normalmente e o Wolf avisa que está offline.
+
+| Tecla | Ação |
+|-------|------|
+| `T` ou `ENTER` | abre o canal com o Wolf; digite e aperte `ENTER` para enviar |
+| `V` | envia a imagem atual da câmera para o Wolf analisar |
+| `H` | mostra/esconde a ajuda |
+| `ESC` | sai (ou cancela a digitação) |
+
+A janela do OpenCV não aceita acentos; para escrever com acentos, digite a mensagem
+no próprio terminal do PowerShell e aperte `ENTER`.
+
+Cada mensagem vai para o Wolf junto com uma linha do que os sensores veem agora
+(rosto, mãos, objetos e gesto), então dá para perguntar coisas como "o que tem na
+minha mão?" ou "quantas pessoas você vê?".
+
+Opções úteis:
+
+```powershell
+python visor.py --camera 1                 # outra webcam
+python visor.py --image foto.jpg           # usa uma foto no lugar da webcam
+python visor.py --image foto.jpg --snapshot saida.png   # salva o HUD e sai
+$env:WOLF_MODEL = "claude-haiku-4-5"       # modelo mais barato/rápido para o Wolf
+```
+
+Arquivos:
+
+- `visor.py`: laço principal, sensores (rosto e mãos do MemeCV + detector de objetos) e teclado.
+- `visor_hud.py`: desenho do HUD (lente, moldura, miras, leituras, painel do Wolf).
+- `wolf.py`: personalidade e conversa do Wolf pela API do Claude.
+
+## MemeCV
+
+```powershell
+python main.py
+```
+
+Coloque as imagens dos memes em `assets/new/` (veja `assets/new/README.md`).
